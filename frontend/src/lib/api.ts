@@ -160,6 +160,7 @@ export async function recommendRoutes(
   origin: SelectedPlace,
   destination: SelectedPlace,
   walkSpeed: "slow" | "normal" | "fast",
+  routeSort: "fastest" | "min_transfer" | "min_walk" = "fastest",
 ): Promise<RouteOption[]> {
   const res = await fetch(apiUrl("/api/v1/routes/recommend"), {
     method: "POST",
@@ -178,7 +179,7 @@ export async function recommendRoutes(
         name: destination.name,
       },
       mode: "transit",
-      preferences: { walk_speed: walkSpeed, route_sort: "fastest" },
+      preferences: { walk_speed: walkSpeed, route_sort: routeSort },
       options: { top_n: 3, include_steps: true },
     }),
   });
@@ -186,16 +187,17 @@ export async function recommendRoutes(
   return (data.routes ?? []).map(mapBackendRoute);
 }
 
-export async function startGuidance(routeId: string, origin: SelectedPlace): Promise<void> {
+export async function startGuidance(routeId: string, origin: SelectedPlace): Promise<string | void> {
   const res = await fetch(apiUrl("/api/v1/guidance/start"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       route_id: routeId,
       location_permission: true,
-      notify_permission: true,
+      notify_permission: typeof Notification !== "undefined" && Notification.permission === "granted",
       current_location: { lat: origin.lat, lng: origin.lng, name: origin.name },
     }),
   });
-  await readEnvelope(res);
+  const data = await readEnvelope<{ session_id?: string; id?: string }>(res);
+  return data.session_id ?? data.id;
 }

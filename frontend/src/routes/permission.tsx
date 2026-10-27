@@ -35,6 +35,10 @@ function PermissionPage() {
     void navigate({ to: "/" });
   };
 
+  const goSearchOrigin = () => {
+    void navigate({ to: "/search", search: { target: "origin" } });
+  };
+
   const allow = () => {
     setBusy(true);
     setError("");
@@ -61,7 +65,7 @@ function PermissionPage() {
   const skip = () => {
     setLocationDecision("denied");
     setLocationNotice("denied");
-    goHome();
+    goSearchOrigin();
   };
 
   return (

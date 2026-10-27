@@ -1,678 +1,253 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { PhoneShell } from "@/components/tab-bar";
+import { ErrorSheet, type ErrorKind } from "@/components/error-sheet";
+import { resolveCurrentPlace } from "@/lib/api";
+import { getLocationDecision, setLocationDecision, setLocationNotice } from "@/lib/location-permission";
 import {
-  CAR_MINUTES,
-  PLACES,
-  ROUTES,
-  SPEEDS,
-  WALK_ONLY_BASE,
-  etaClock,
-  formatClock,
-  formatCountdown,
-  routeRideMinutes,
-  routeTotalMinutes,
-  routeWalkMinutes,
-  walkMinutes,
-  type Leg,
-  type Place,
-  type RouteOption,
-  type Speed,
-} from "@/lib/transit-data";
-import {
-  recommendRoutes,
-  resolveCurrentPlace,
-  searchPlaces,
-  startGuidance,
-  type SelectedPlace,
-} from "@/lib/api";
-import {
-  getLocationDecision,
-  getSavedOrigin,
+  FAVORITES,
+  getDest,
+  getOrigin,
+  getPrefs,
   isUsablePlace,
-  saveOrigin,
-  setLocationDecision,
-  setLocationNotice,
-} from "@/lib/location-permission";
+  samePlace,
+  setDest,
+  setOrigin,
+} from "@/lib/trip-store";
+import { SPEEDS, type Place } from "@/lib/transit-data";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "세로이동 — 실시간 대중교통 길찾기" },
-      {
-        name: "description",
-        content:
-          "출발지·목적지 검색, 대중교통 경로 탐색, 버스·지하철 실시간 도착정보, 환승 대기시간, 보행속도 반영 도보시간까지 한 화면에서 비교하고 가장 빠른 경로를 추천받으세요.",
-      },
-      { property: "og:title", content: "세로이동 — 실시간 대중교통 길찾기" },
-      {
-        property: "og:description",
-        content: "도보·자가용·대중교통 예상 도착시간을 비교하고 최속 경로를 추천받는 길찾기.",
-      },
+      { title: "세로이동 — 출발지·목적지 입력" },
+      { name: "description", content: "출발지와 도착지를 입력하고 실시간 대중교통 경로를 탐색하세요." },
     ],
   }),
-  component: TransitPlanner,
+  component: HomePage,
 });
 
-const lineChipClass: Record<string, string> = {
-  line2: "bg-line2/10 text-line2",
-  line4: "bg-line4/10 text-line4",
-  line9: "bg-line9/10 text-line9",
-  bus: "bg-bus/10 text-bus",
-};
-
-const dotClass: Record<string, string> = {
-  line2: "bg-line2",
-  line4: "bg-line4",
-  line9: "bg-line9",
-  bus: "bg-bus",
-};
-
-const EMPTY_ORIGIN: Place = {
-  name: "",
-  detail: "출발지를 입력해주세요",
-  lat: Number.NaN,
-  lng: Number.NaN,
-  placeholder: true,
-};
-
-function PlaceField({
-  label,
-  value,
-  emptyHint,
-  onChange,
-  tone,
-}: {
-  label: string;
-  value: string;
-  emptyHint: string;
-  onChange: (p: Place) => void;
-  tone: "origin" | "destination";
-}) {
-  const [query, setQuery] = useState("");
-  const [open, setOpen] = useState(false);
-  const [remote, setRemote] = useState<Place[]>([]);
-  const boxRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, []);
-
-  useEffect(() => {
-    const q = query.trim();
-    if (!open) return;
-    if (!q) {
-      setRemote([]);
-      return;
-    }
-    const t = window.setTimeout(() => {
-      void searchPlaces(q)
-        .then((items) =>
-          setRemote(
-            items
-              .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng))
-              .map((p) => ({
-                name: p.name,
-                detail: p.address || p.category || "",
-                lat: p.lat,
-                lng: p.lng,
-                place_id: p.id,
-              })),
-          ),
-        )
-        .catch(() => setRemote([]));
-    }, 250);
-    return () => window.clearTimeout(t);
-  }, [query, open]);
-
-  const results = useMemo(() => {
-    const q = query.trim();
-    const local = !q
-      ? PLACES.slice(0, 6)
-      : PLACES.filter((p) => p.name.includes(q) || p.detail.includes(q)).slice(0, 6);
-    const merged = [...remote];
-    for (const p of local) {
-      if (!merged.some((m) => m.name === p.name)) merged.push(p);
-    }
-    return merged.slice(0, 8);
-  }, [query, remote]);
-
-  const dark = tone === "destination";
-
-  return (
-    <div ref={boxRef} className="relative">
-      <div
-        className={`flex items-center gap-2 rounded-2xl px-3 py-2.5 ${
-          dark ? "bg-ink text-primary-foreground" : "bg-muted"
-        }`}
-      >
-        <span
-          className={`font-mono text-[11px] ${dark ? "text-paper/50" : "text-muted-foreground"}`}
-        >
-          {label}
-        </span>
-        <input
-          value={open ? query : value}
-          onFocus={() => {
-            setQuery("");
-            setOpen(true);
-          }}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={open ? "역·장소 검색" : value || emptyHint}
-          aria-label={`${label} 검색`}
-          className={`w-full bg-transparent text-sm font-semibold outline-none ${
-            dark
-              ? "text-paper placeholder:text-paper/40"
-              : "text-foreground placeholder:text-muted-foreground"
-          }`}
-        />
-      </div>
-
-      {open && (
-        <ul className="absolute left-0 right-0 top-full z-20 mt-2 overflow-hidden rounded-2xl bg-card ring-1 ring-border animate-rise">
-          {results.length === 0 && (
-            <li className="px-3 py-3 text-[12px] text-muted-foreground">검색 결과가 없습니다</li>
-          )}
-          {results.map((p) => (
-            <li key={`${p.name}-${p.lat}-${p.lng}`}>
-              <button
-                type="button"
-                onClick={() => {
-                  onChange(p);
-                  setOpen(false);
-                }}
-                className="flex w-full flex-col items-start gap-0.5 px-3 py-2.5 text-left hover:bg-muted"
-              >
-                <span className="text-sm font-semibold">{p.name}</span>
-                <span className="text-[11px] text-muted-foreground">{p.detail}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function LiveArrival({ seconds, stopsAway }: { seconds: number; stopsAway: number }) {
-  const [left, setLeft] = useState(seconds);
-  useEffect(() => {
-    setLeft(seconds);
-    const id = setInterval(() => setLeft((s) => (s <= 1 ? seconds : s - 1)), 1000);
-    return () => clearInterval(id);
-  }, [seconds]);
-
-  return (
-    <div className="mt-1.5 flex items-center gap-2 rounded-xl bg-muted px-2.5 py-1.5">
-      <span className="size-1.5 rounded-full bg-lime-deep animate-tick" />
-      <span className="font-mono text-[11px] font-bold tabular-nums">{formatCountdown(left)}</span>
-      <span className="text-[10px] text-muted-foreground">
-        {stopsAway <= 0 ? "전역 출발" : `${stopsAway}번째 전 역`}
-      </span>
-    </div>
-  );
-}
-
-function LegRow({ leg, speed, last }: { leg: Leg; speed: Speed; last: boolean }) {
-  const mins = leg.kind === "walk" ? walkMinutes(leg.minutes, speed) : leg.minutes;
-  const dot =
-    leg.kind === "walk" || leg.kind === "transfer" ? "bg-ink" : dotClass[leg.lineColor ?? "bus"];
-
-  return (
-    <div className="flex gap-3">
-      <div className="flex flex-col items-center">
-        <span className={`mt-1.5 size-2.5 shrink-0 rounded-full ${dot}`} />
-        {!last && <span className="w-px flex-1 bg-border" />}
-      </div>
-      <div className={`flex-1 ${last ? "" : "pb-3"}`}>
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold">
-            {leg.title} <span className="font-mono text-[12px] tabular-nums">{mins}분</span>
-          </p>
-          {leg.line && (
-            <span
-              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                lineChipClass[leg.lineColor ?? "bus"]
-              }`}
-            >
-              {leg.line}
-            </span>
-          )}
-        </div>
-        <p className="text-[11px] text-muted-foreground">
-          {leg.sub}
-          {leg.kind === "walk" ? ` · ${SPEEDS[speed].label} 속도 반영` : ""}
-        </p>
-        {leg.arrivalSeconds !== undefined && (
-          <LiveArrival seconds={leg.arrivalSeconds} stopsAway={leg.stopsAway ?? 0} />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function toSelected(p: Place): SelectedPlace {
-  return { name: p.name, detail: p.detail, lat: p.lat, lng: p.lng, place_id: p.place_id };
-}
-
-function TransitPlanner() {
+function HomePage() {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
-  const [originPlace, setOriginPlace] = useState<Place>(EMPTY_ORIGIN);
-  const [destinationPlace, setDestinationPlace] = useState<Place>(PLACES[1]!);
-  const origin = originPlace.name || originPlace.detail;
-  const destination = destinationPlace.name;
-  const [speed, setSpeed] = useState<Speed>("normal");
-  const [selected, setSelected] = useState("r1");
-  const [now, setNow] = useState<Date | null>(null);
-  const [apiRoutes, setApiRoutes] = useState<RouteOption[] | null>(null);
-  const [status, setStatus] = useState("");
-  const [searching, setSearching] = useState(false);
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [origin, setOriginState] = useState<Place | null>(null);
+  const [dest, setDestState] = useState<Place | null>(null);
   const [locating, setLocating] = useState(false);
-
-  useEffect(() => {
-    setNow(new Date());
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
+  const [error, setError] = useState<ErrorKind>(null);
+  const prefs = typeof window === "undefined" ? null : getPrefs();
 
   useEffect(() => {
     if (!getLocationDecision()) {
       void navigate({ to: "/permission" });
       return;
     }
-    const saved = getSavedOrigin();
-    if (saved) setOriginPlace(saved);
+    setOriginState(getOrigin());
+    setDestState(getDest());
     setReady(true);
   }, [navigate]);
 
-  useEffect(() => {
-    if (!ready) return;
-    if (!isUsablePlace(originPlace) || !isUsablePlace(destinationPlace)) {
-      setApiRoutes(null);
-      setSearching(false);
-      setStatus("");
-      return;
-    }
-    let cancelled = false;
-    setSearching(true);
-    setStatus("경로를 찾는 중…");
-    void recommendRoutes(toSelected(originPlace), toSelected(destinationPlace), speed)
-      .then((routes) => {
-        if (cancelled) return;
-        setApiRoutes(routes);
-        setSelected(routes[0]?.id ?? "");
-        setStatus(routes.length ? "" : "이동 가능한 경로를 찾지 못했습니다.");
-      })
-      .catch((err: Error) => {
-        if (cancelled) return;
-        setApiRoutes(null);
-        setStatus(err.message || "실시간 경로를 불러오지 못해 예시 경로를 표시합니다.");
-      })
-      .finally(() => {
-        if (!cancelled) setSearching(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [originPlace, destinationPlace, speed, refreshTick, ready]);
-
-  const canSearch = isUsablePlace(originPlace) && isUsablePlace(destinationPlace);
-  const ranked = useMemo(
-    () =>
-      [...(apiRoutes && apiRoutes.length > 0 ? apiRoutes : canSearch ? ROUTES : [])].sort(
-        (a, b) => routeTotalMinutes(a, speed) - routeTotalMinutes(b, speed),
-      ),
-    [speed, apiRoutes, canSearch],
-  );
-  const fastest: RouteOption | undefined = ranked[0];
-  const transitMin = fastest ? routeTotalMinutes(fastest, speed) : 0;
-  const walkOnly = walkMinutes(WALK_ONLY_BASE, speed);
-  const detail = ranked.find((r) => r.id === selected) ?? fastest;
-  const detailTransferWait = detail
-    ? detail.legs.filter((l) => l.kind === "transfer").reduce((s, l) => s + l.minutes, 0)
-    : 0;
-
-  const modes = [
-    { key: "transit", label: "대중교통", minutes: transitMin, note: `환승 ${fastest?.transfers ?? 0}회` },
-    { key: "car", label: "자가용", minutes: CAR_MINUTES, note: "차량 9.4km" },
-    { key: "walk", label: "도보", minutes: walkOnly, note: `${SPEEDS[speed].label} 속도` },
-  ];
-  const bestMode = modes.reduce((a, b) => (b.minutes < a.minutes ? b : a));
-
   if (!ready) return null;
 
-  return (
-    <div className="min-h-screen bg-background font-sans text-foreground antialiased">
-      <div className="mx-auto max-w-[430px] px-4 pb-14 pt-5">
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="grid size-9 place-items-center rounded-2xl bg-ink font-display text-lg text-lime">
-              세
-            </div>
-            <div className="leading-tight">
-              <p className="text-sm font-bold">세로이동</p>
-              <p className="font-mono text-[10px] text-muted-foreground">SEOUL TRANSIT · 실시간</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5 rounded-full bg-card px-3 py-1.5 ring-1 ring-border">
-            <span className="size-1.5 rounded-full bg-lime-deep animate-tick" />
-            <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
-              {now ? formatClock(now) : "--:--:--"}
-            </span>
-          </div>
-        </header>
+  const canSearch = isUsablePlace(origin) && isUsablePlace(dest);
+  const sortLabel =
+    prefs?.route_sort === "min_transfer" ? "최소 환승" : prefs?.route_sort === "min_walk" ? "최소 도보" : "빠른 도착";
+  const speed = prefs?.walk_speed ?? "normal";
 
-        {/* 출발지 / 목적지 검색 */}
-        <section className="clay-card relative z-10 mt-4 rounded-3xl p-3 ring-1 ring-border animate-rise">
-          <div className="flex items-center gap-3">
-            <div className="flex flex-col items-center py-1">
-              <span className="size-2.5 rounded-full bg-ink" />
-              <span className="h-4 w-px bg-border" />
-              <span className="size-2.5 rounded-full bg-line2" />
-            </div>
-            <div className="flex-1 space-y-2">
-              <PlaceField
-                label="출발"
-                value={originPlace.name}
-                emptyHint="출발지를 입력해주세요"
-                onChange={(p) => {
-                  saveOrigin(p);
-                  setOriginPlace(p);
-                }}
-                tone="origin"
-              />
-              <PlaceField
-                label="목적"
-                value={destinationPlace.name}
-                emptyHint="어디로 이동하시나요?"
-                onChange={setDestinationPlace}
-                tone="destination"
-              />
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setOriginPlace(destinationPlace);
-                setDestinationPlace(originPlace);
-              }}
-              aria-label="출발지와 목적지 바꾸기"
-              className="grid size-11 place-items-center rounded-2xl bg-lime text-lg font-bold text-primary-foreground"
+  const applyOrigin = (place: Place) => {
+    setOrigin(place);
+    setOriginState(place);
+  };
+  const applyDest = (place: Place) => {
+    setDest(place);
+    setDestState(place);
+  };
+
+  return (
+    <PhoneShell>
+      <header>
+        <h1 className="text-sm font-bold">세로이동</h1>
+        <p className="font-mono text-[10px] text-muted-foreground">HM_01_01</p>
+      </header>
+
+      <p className="mt-8 font-display text-4xl leading-tight">어디로 갈까요?</p>
+
+      <section className="clay-card relative mt-5 rounded-[28px] p-4 ring-1 ring-border">
+        <div className="flex items-stretch gap-3">
+          <div className="min-w-0 flex-1">
+            <Link
+              to="/search"
+              search={{ target: "origin" }}
+              className="flex items-center gap-3 py-2"
             >
-              ⇅
-            </button>
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-lime text-[10px] font-bold text-primary-foreground">
+                출발
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-bold">{origin?.name || "출발지를 검색하세요"}</span>
+                {origin?.detail && <span className="block truncate text-[11px] text-muted-foreground">{origin.detail}</span>}
+              </span>
+            </Link>
+            {origin && (
+              <button
+                type="button"
+                aria-label="출발지 지우기"
+                className="absolute right-14 top-5 text-muted-foreground"
+                onClick={() => {
+                  setOrigin(null);
+                  setOriginState(null);
+                }}
+              >
+                ×
+              </button>
+            )}
+            <div className="ml-4 border-t border-border" />
+            <Link to="/search" search={{ target: "destination" }} className="flex items-center gap-3 py-2">
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-ink text-[10px] font-bold text-paper">
+                도착
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-bold">{dest?.name || "도착지를 검색하세요"}</span>
+                {dest?.detail && <span className="block truncate text-[11px] text-muted-foreground">{dest.detail}</span>}
+              </span>
+            </Link>
+            {dest && (
+              <button
+                type="button"
+                aria-label="도착지 지우기"
+                className="absolute right-14 bottom-5 text-muted-foreground"
+                onClick={() => {
+                  setDest(null);
+                  setDestState(null);
+                }}
+              >
+                ×
+              </button>
+            )}
           </div>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              disabled={locating}
-              onClick={() => {
+          <button
+            type="button"
+            aria-label="출발·도착 바꾸기"
+            className="mt-6 grid size-10 shrink-0 place-items-center self-center rounded-full bg-muted text-sm font-bold"
+            onClick={() => {
+              const nextO = dest;
+              const nextD = origin;
+              if (nextO && isUsablePlace(nextO)) applyOrigin(nextO);
+              else {
+                setOrigin(null);
+                setOriginState(null);
+              }
+              if (nextD && isUsablePlace(nextD)) applyDest(nextD);
+              else {
+                setDest(null);
+                setDestState(null);
+              }
+            }}
+          >
+            ↑↓
+          </button>
+        </div>
+      </section>
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          disabled={locating}
+          onClick={() => {
+            setLocating(true);
+            void resolveCurrentPlace()
+              .then((place) => {
+                setLocationDecision("granted");
+                setLocationNotice(null);
+                applyOrigin(place);
+              })
+              .catch((err: Error) => {
+                setError(/거부|denied/i.test(err.message) ? "denied" : "failed");
+              })
+              .finally(() => setLocating(false));
+          }}
+          className="rounded-full bg-card px-3 py-2 text-[12px] font-semibold ring-1 ring-border"
+        >
+          {locating ? "위치 확인 중…" : "◎ 현재 위치를 출발지로"}
+        </button>
+        {FAVORITES.map((f) => (
+          <button
+            key={f.short}
+            type="button"
+            onClick={() => applyDest(f.place)}
+            className="rounded-full bg-card px-3 py-2 text-[12px] font-semibold ring-1 ring-border"
+          >
+            ★ {f.short}
+          </button>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        disabled={!canSearch}
+        onClick={() => {
+          if (!origin || !dest) return;
+          if (samePlace(origin, dest)) {
+            setError("same-place");
+            return;
+          }
+          void navigate({ to: "/results" });
+        }}
+        className="mt-5 w-full rounded-full bg-lime py-3.5 text-[15px] font-bold text-primary-foreground disabled:opacity-40"
+      >
+        ⌕ 경로 탐색
+      </button>
+      {!canSearch && (
+        <p className="mt-2 text-center text-[12px] text-muted-foreground">출발지와 도착지를 모두 입력하면 탐색할 수 있어요</p>
+      )}
+
+      <Link to="/settings" className="clay-card mt-5 block rounded-[28px] p-4 ring-1 ring-border">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-bold">내 이동 설정</p>
+          <span className="text-[12px] text-muted-foreground">변경 ›</span>
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <div className="rounded-2xl bg-muted px-2 py-3 text-center">
+            <p className="text-[11px] text-muted-foreground">걷기</p>
+            <p className="mt-1 text-sm font-bold">{SPEEDS[speed].label}</p>
+            <p className="text-[10px] text-muted-foreground">{SPEEDS[speed].kmh}km/h</p>
+          </div>
+          <div className="rounded-2xl bg-muted px-2 py-3 text-center">
+            <p className="text-[11px] text-muted-foreground">선호</p>
+            <p className="mt-1 text-sm font-bold">{sortLabel}</p>
+          </div>
+          <div className="rounded-2xl bg-muted px-2 py-3 text-center">
+            <p className="text-[11px] text-muted-foreground">알림</p>
+            <p className="mt-1 text-sm font-bold">{prefs?.alert_minutes_before ?? 2}분 전</p>
+            <p className="text-[10px] text-muted-foreground">하차·환승</p>
+          </div>
+        </div>
+      </Link>
+
+      <ErrorSheet
+        kind={error}
+        onRetry={
+          error === "denied" || error === "failed"
+            ? () => {
+                setError(null);
                 setLocating(true);
                 void resolveCurrentPlace()
                   .then((place) => {
                     setLocationDecision("granted");
-                    saveOrigin(place);
-                    setLocationNotice(null);
-                    setOriginPlace(place);
-                    setStatus("");
+                    applyOrigin(place);
                   })
-                  .catch((err: Error) => {
-                    setStatus(err.message || "현재 위치를 가져오지 못했습니다.");
-                  })
+                  .catch(() => setError("failed"))
                   .finally(() => setLocating(false));
-              }}
-              className="rounded-full bg-ink px-2.5 py-1 text-[11px] font-medium text-paper disabled:opacity-60"
-            >
-              {locating ? "위치 확인 중…" : "현재 위치"}
-            </button>
-            {["집 (망원동)", "회사 (역삼동)", "강남역", "성수역"].map((name) => (
-              <button
-                key={name}
-                type="button"
-                onClick={() => {
-                  const found = PLACES.find((p) => p.name === name);
-                  if (found) setDestinationPlace(found);
-                }}
-                className="rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium"
-              >
-                {name}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {/* 수단별 예상 도착시간 */}
-        <section className="mt-4 animate-rise [animation-delay:80ms]">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-xs font-bold tracking-tight">예상 도착시간</h2>
-            <span className="font-mono text-[10px] text-muted-foreground">ETA</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            {modes.map((m) => (
-              <div key={m.key} className="clay-card rounded-2xl p-3 ring-1 ring-border">
-                <p className="text-[11px] font-medium text-muted-foreground">{m.label}</p>
-                <p className="mt-1 font-mono text-lg font-bold tabular-nums">{m.minutes}분</p>
-                <p
-                  className={`font-mono text-[10px] ${
-                    m.key === bestMode.key ? "text-lime-deep" : "text-muted-foreground"
-                  }`}
-                >
-                  {m.key === bestMode.key ? "가장 빠름" : m.note}
-                </p>
-                <p className="font-mono text-[10px] text-muted-foreground">
-                  {now ? `${etaClock(m.minutes, now)} 도착` : "— 도착"}
-                </p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* 보행 속도 */}
-        <section className="mt-4 animate-rise [animation-delay:140ms]">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-xs font-bold tracking-tight">보행 속도</h2>
-            <span className="font-mono text-[10px] text-muted-foreground">
-              {SPEEDS[speed].kmh}km/h · 도보시간 반영
-            </span>
-          </div>
-          <div className="clay-card grid grid-cols-3 gap-1.5 rounded-2xl p-1.5 ring-1 ring-border">
-            {(Object.keys(SPEEDS) as Speed[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setSpeed(s)}
-                className={`rounded-xl py-2 text-xs font-semibold transition-colors ${
-                  speed === s ? "bg-ink text-paper" : "text-muted-foreground"
-                }`}
-              >
-                {SPEEDS[s].label}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {/* 경로 옵션 */}
-        <section className="mt-5 animate-rise [animation-delay:200ms]">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-xs font-bold tracking-tight">경로 옵션</h2>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={searching}
-                onClick={() => setRefreshTick((n) => n + 1)}
-                className="font-mono text-[10px] font-semibold text-lime-deep disabled:opacity-50"
-              >
-                {searching ? "검색 중" : "새로고침"}
-              </button>
-              <span className="font-mono text-[10px] text-muted-foreground">
-                {searching ? "검색 중" : `${ranked.length}개`}
-              </span>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {ranked.map((r, i) => {
-              const total = routeTotalMinutes(r, speed);
-              const isFastest = i === 0;
-              const isSelected = detail.id === r.id;
-              return (
-                <button
-                  key={r.id}
-                  type="button"
-                  onClick={() => setSelected(r.id)}
-                  className={`clay-card relative block w-full rounded-3xl p-4 text-left ${
-                    isFastest
-                      ? "ring-2 ring-lime-deep animate-pulse-soft"
-                      : isSelected
-                        ? "ring-2 ring-ink"
-                        : "ring-1 ring-border"
-                  }`}
-                >
-                  {isFastest && (
-                    <span className="absolute -top-2.5 left-4 rounded-full bg-lime px-2.5 py-0.5 text-[10px] font-bold text-primary-foreground">
-                      최속 경로
-                    </span>
-                  )}
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <p
-                        className={`font-mono font-bold tabular-nums ${
-                          isFastest ? "text-2xl" : "text-xl"
-                        }`}
-                      >
-                        {total}분
-                      </p>
-                      <p className="text-[11px] text-muted-foreground">
-                        환승 {r.transfers}회 · 도보 {routeWalkMinutes(r, speed)}분 · 탑승{" "}
-                        {routeRideMinutes(r)}분
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="font-mono text-sm font-bold tabular-nums">
-                        {r.fare.toLocaleString("ko-KR")}원
-                      </p>
-                      <p className="font-mono text-[10px] text-muted-foreground">
-                        {now ? `${etaClock(total, now)} 도착` : "— 도착"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {r.legs
-                      .filter((l) => l.line)
-                      .map((l, idx) => (
-                        <span
-                          key={`${r.id}-${idx}`}
-                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                            lineChipClass[l.lineColor ?? "bus"]
-                          }`}
-                        >
-                          {l.kind === "bus" ? `버스 ${l.line}` : l.line}
-                        </span>
-                      ))}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </section>
-
-        {/* 경로 상세 + 실시간 도착 + 환승 대기 */}
-        {detail && (
-        <section className="mt-5 animate-rise [animation-delay:260ms]">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-xs font-bold tracking-tight">경로 상세</h2>
-            <span className="font-mono text-[10px] text-muted-foreground">
-              환승 대기 합계 {detailTransferWait}분
-            </span>
-          </div>
-          <div className="clay-card rounded-3xl p-4 ring-1 ring-border">
-            <div className="mb-3 flex items-center justify-between border-b border-border pb-3">
-              <p className="text-[11px] text-muted-foreground">
-                {origin} → {destination}
-              </p>
-              <p className="font-mono text-[11px] font-bold tabular-nums">
-                총 {routeTotalMinutes(detail, speed)}분
-              </p>
-            </div>
-            {detail.legs.map((leg, i) => (
-              <LegRow
-                key={`${detail.id}-leg-${i}`}
-                leg={leg}
-                speed={speed}
-                last={i === detail.legs.length - 1}
-              />
-            ))}
-          </div>
-        </section>
-        )}
-
-        {/* 개략도 */}
-        {detail && (
-        <section className="mt-5 animate-rise [animation-delay:320ms]">
-          <div className="relative overflow-hidden rounded-3xl bg-ink-soft p-4">
-            <div
-              className="absolute inset-0 opacity-20"
-              style={{
-                backgroundImage:
-                  "linear-gradient(#ffffff22 1px, transparent 1px), linear-gradient(90deg, #ffffff22 1px, transparent 1px)",
-                backgroundSize: "28px 28px",
-              }}
-            />
-            <div className="relative">
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-[10px] text-paper/60">SCHEMATIC</span>
-                <span className="font-mono text-[10px] text-lime">
-                  {origin} → {destination}
-                </span>
-              </div>
-              <div className="mt-4 flex items-center gap-2">
-                <span className="size-3 shrink-0 rounded-full bg-paper" />
-                {detail.legs
-                  .filter((l) => l.kind !== "transfer")
-                  .map((l, i) => (
-                    <span
-                      key={`sch-${i}`}
-                      className={`h-1 flex-1 rounded-full ${
-                        l.kind === "walk" ? "bg-paper/30" : dotClass[l.lineColor ?? "bus"]
-                      }`}
-                    />
-                  ))}
-                <span className="size-3 shrink-0 rounded-full bg-lime" />
-              </div>
-              <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-paper/50">
-                <span>{origin}</span>
-                <span>{destination}</span>
-              </div>
-            </div>
-          </div>
-        </section>
-        )}
-
-        {status && (
-          <p className="mt-3 text-center text-[11px] text-muted-foreground">{status}</p>
-        )}
-        <button
-          type="button"
-          onClick={() => {
-            if (!detail?.fromApi) {
-              setStatus("실시간 경로를 찾은 뒤 출발할 수 있습니다.");
-              return;
-            }
-            void startGuidance(detail.id, toSelected(originPlace))
-              .then(() => setStatus("길안내를 시작했습니다."))
-              .catch((err: Error) => {
-                setStatus(err.message || "길안내를 시작하지 못했습니다.");
-              });
-          }}
-          className="mt-5 w-full rounded-2xl bg-lime py-3.5 text-[15px] font-bold text-primary-foreground animate-rise [animation-delay:380ms]"
-        >
-          이 경로로 출발
-        </button>
-      </div>
-    </div>
+              }
+            : undefined
+        }
+        onSearch={
+          error
+            ? () => {
+                setError(null);
+                void navigate({ to: "/search", search: { target: "origin" } });
+              }
+            : undefined
+        }
+      />
+    </PhoneShell>
   );
 }
