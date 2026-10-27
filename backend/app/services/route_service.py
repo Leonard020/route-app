@@ -1,14 +1,13 @@
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import NotFoundError, ExternalServiceError
+from app.core.errors import NotFoundError, ExternalServiceError, ValidationError
 from app.core.response import Meta
 from app.db.session import get_db
 from app.deps.predictor import get_predictor
-from app.models.route import Route
 from app.models.feedback import Feedback
 from app.ports.predictor import (
     PredictorPort, ETARequest, ETASegmentIn,
@@ -18,9 +17,13 @@ from app.repositories.route_repo import RouteRepository
 from app.repositories.prediction_repo import PredictionRepository
 from app.repositories.feedback_repo import FeedbackRepository
 from app.schemas.route import (
-    RouteRecommendRequest, RouteRecommendResponse, Route, RouteStep,
+    RouteRecommendRequest, RouteRecommendResponse, RouteOut, RouteStep,
     RouteSummary, RerouteRequest, RerouteResponse, RerouteDelta, FeedbackCreate, LatLng,
 )
+from app.models.route import Route as RouteModel
+from app.core.settings import settings
+from app.services.bus_service import BusService
+from app.services.subway_service import SubwayService
 from app.engines.router import Router
 from app.engines.graph import GraphProvider
 from app.engines.eta import ETAService
@@ -48,6 +51,11 @@ class RouteService:
         user=None,
     ) -> dict:
         t0 = time.perf_counter()
+        if (
+            abs(payload.origin.lat - payload.destination.lat) < 1e-6
+            and abs(payload.origin.lng - payload.destination.lng) < 1e-6
+        ):
+            raise ValidationError("출발지와 다른 목적지를 선택해주세요.")
 
         # 1) 후보 경로 탐색
         candidates = await self.router.find_candidates(
@@ -59,6 +67,8 @@ class RouteService:
         )
         if not candidates:
             raise NotFoundError("no route found")
+
+        realtime_meta = await self._apply_realtime(candidates)
 
         # 2) ETA 예측 (PredictorPort)
         eta_results = []
@@ -81,6 +91,11 @@ class RouteService:
                 depart_at=payload.depart_at or datetime.now(timezone.utc),
                 mode=payload.mode,
             )
+            wait = int(c.get("realtime_wait_s") or 0)
+            if wait:
+                eta_resp = eta_resp.model_copy(
+                    update={"total_duration_s": eta_resp.total_duration_s + wait}
+                )
             eta_results.append(eta_resp)
             await self.predictions.log(
                 route_id=None,
@@ -100,6 +115,8 @@ class RouteService:
                 eco_priority=payload.preferences.eco_priority if payload.preferences else False,
                 max_walk_min=payload.preferences.max_walk_min if payload.preferences else 20,
                 accessibility=payload.preferences.accessibility if payload.preferences else False,
+                walk_speed=payload.preferences.walk_speed if payload.preferences else "normal",
+                route_sort=payload.preferences.route_sort if payload.preferences else "fastest",
             ),
             candidates=[
                 RankCandidate(
@@ -127,7 +144,7 @@ class RouteService:
                 if any(e.request_id == rank_item.route_id for e in eta_results) \
                 else eta_results[0]
 
-            route_model = Route(
+            route_model = RouteModel(
                 user_id=user.id if user else None,
                 origin_place_id=payload.origin.place_id,
                 dest_place_id=payload.destination.place_id,
@@ -143,7 +160,7 @@ class RouteService:
                 transfer_count=c.get("transfer_count", 0),
                 walk_distance_m=c.get("walk_distance_m", 0),
                 carbon_g=c.get("carbon_g", 0),
-                eta=datetime.now(timezone.utc),
+                eta=datetime.now(timezone.utc) + timedelta(seconds=eta.total_duration_s),
                 polyline=c.get("polyline") if (payload.options and payload.options.include_polyline) else None,
                 predictor_version=eta.model_version,
             )
@@ -151,7 +168,7 @@ class RouteService:
             await self.routes.add_with_steps(route_model, steps_payload)
             await self.db.commit()
 
-            result_routes.append(Route(
+            result_routes.append(RouteOut(
                 route_id=str(route_model.id),
                 rank=rank_item.rank,
                 mode=payload.mode,
@@ -163,6 +180,8 @@ class RouteService:
                     walk_distance_m=route_model.walk_distance_m,
                     carbon_g=route_model.carbon_g,
                     eta=route_model.eta,
+                    realtime_used=realtime_meta.get("used", False),
+                    last_fetched_at=realtime_meta.get("fetched_at"),
                 ),
                 polyline=route_model.polyline,
                 steps=[RouteStep(**s) for s in steps_payload] if (payload.options and payload.options.include_steps) else [],
@@ -182,6 +201,18 @@ class RouteService:
         if not route:
             raise NotFoundError("route not found")
         return self._serialize_route(route)
+
+    async def refresh(self, route_id: str) -> RerouteResponse:
+        route = await self.routes.get_with_steps(route_id)
+        if not route:
+            raise NotFoundError("route not found")
+        return await self.reroute(
+            route_id,
+            RerouteRequest(
+                current_location=LatLng(lat=route.origin_lat, lng=route.origin_lng),
+                reason="manual",
+            ),
+        )
 
     async def reroute(self, route_id: str, payload: RerouteRequest) -> RerouteResponse:
         route = await self.routes.get_with_steps(route_id)
@@ -252,7 +283,63 @@ class RouteService:
             })
         return out
 
-    def _serialize_route(self, route: Route) -> dict:
+    async def _apply_realtime(self, candidates: list[dict]) -> dict:
+        used = False
+        fetched_at = None
+        bus_svc = BusService(self.db)
+        subway_svc = SubwayService(self.db)
+        for cand in candidates:
+            extra_wait = 0
+            for step in cand.get("steps", []):
+                info = step.get("transit_info") or {}
+                mode = step.get("mode")
+                try:
+                    if mode == "bus" and info.get("node_id"):
+                        result = await bus_svc.arrivals(
+                            city_code=str(info.get("city_code") or settings.DEFAULT_BUS_CITY_CODE),
+                            node_id=str(info["node_id"]),
+                            route_id=info.get("route_id"),
+                        )
+                        waits = [i.arr_time_seconds for i in result.items if i.arr_time_seconds is not None]
+                        wait = min(waits) if waits else None
+                        if wait is not None and wait >= settings.BOARDING_BUFFER_SECONDS:
+                            extra_wait += wait
+                            step["duration_s"] = int(step.get("duration_s") or 0) + wait
+                            info["realtime"] = True
+                            info["arr_time_seconds"] = wait
+                            fetched_at = result.fetched_at
+                            used = True
+                        else:
+                            info["realtime"] = False
+                            info["fallback"] = "timetable"
+                    elif mode == "subway" and (info.get("station_name") or info.get("station_id")):
+                        result = await subway_svc.arrivals(
+                            station_name=info.get("station_name"),
+                            subway_id=info.get("subway_id"),
+                            station_id=info.get("station_id"),
+                            updn_line=info.get("updn_line"),
+                        )
+                        waits = [i.arrival_seconds for i in result.items if i.arrival_seconds is not None]
+                        wait = min(waits) if waits else None
+                        if wait is not None:
+                            extra_wait += wait
+                            step["duration_s"] = int(step.get("duration_s") or 0) + wait
+                            info["realtime"] = True
+                            info["arrival_seconds"] = wait
+                            fetched_at = result.fetched_at
+                            used = True
+                        else:
+                            info["realtime"] = False
+                            info["fallback"] = "timetable"
+                except ExternalServiceError:
+                    info["realtime"] = False
+                    info["fallback"] = "unavailable"
+                step["transit_info"] = info
+            if extra_wait:
+                cand["realtime_wait_s"] = extra_wait
+        return {"used": used, "fetched_at": fetched_at}
+
+    def _serialize_route(self, route: RouteModel) -> dict:
         return {
             "route_id": str(route.id),
             "mode": route.mode,

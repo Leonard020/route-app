@@ -1,11 +1,13 @@
 from typing import Optional
 from fastapi import Depends
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NotFoundError
 from app.db.session import get_db
+from app.models.recent_search import RecentSearch
 from app.repositories.place_repo import PlaceRepository
-from app.repositories.recent_search_repo import RecentSearchRepository  # 신규
+from app.repositories.recent_search_repo import RecentSearchRepository
 
 
 class PlaceService:
@@ -39,8 +41,44 @@ class PlaceService:
                     "lng": p.lng,
                 }
                 for p in items
+            ],
+            "message": None if items else "검색 결과가 없습니다. 다른 검색어로 입력해주세요.",
+        }
+
+    async def recent(self, user=None) -> dict:
+        if not user:
+            return {"items": [], "message": "최근 검색 내역이 없습니다."}
+        rows = (
+            await self.db.execute(
+                select(RecentSearch)
+                .where(RecentSearch.user_id == user.id)
+                .order_by(RecentSearch.searched_at.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+        if not rows:
+            return {"items": [], "message": "최근 검색 내역이 없습니다."}
+        return {
+            "items": [
+                {
+                    "id": str(r.id),
+                    "keyword": r.keyword,
+                    "lat": r.lat,
+                    "lng": r.lng,
+                    "searched_at": r.searched_at,
+                }
+                for r in rows
             ]
         }
+
+    async def delete_recent(self, recent_id, user) -> dict:
+        from uuid import UUID
+        row = await self.db.get(RecentSearch, UUID(str(recent_id)))
+        if not row or (user and row.user_id != user.id):
+            raise NotFoundError("검색 기록이 없습니다.")
+        await self.db.delete(row)
+        await self.db.commit()
+        return {"deleted": True}
 
     async def get_detail(self, place_id) -> dict:
         p = await self.places.get(place_id)

@@ -22,5 +22,19 @@ class Settings(BaseSettings):
     ML_BASE_URL: str = "http://ml:8100"
     ML_API_KEY: str = "dev-ml-key"
 
+    TAGO_SERVICE_KEY: str = ""
+    TAGO_BASE_URL: str = "http://apis.data.go.kr/1613000/ArvlInfoInqireService"
+    TAGO_TIMEOUT_S: float = 5.0
+
+    SEOUL_SUBWAY_KEY: str = "sample"
+    SEOUL_SUBWAY_BASE_URL: str = "http://swopenapi.seoul.go.kr/api/subway"
+    SEOUL_SUBWAY_TIMEOUT_S: float = 8.0
+    SEOUL_SUBWAY_PAGE_SIZE: int = 1000
+
+    DEFAULT_BUS_CITY_CODE: str = "11"
+    REALTIME_STALE_SECONDS: int = 30
+    DEFAULT_WALK_SPEED_MPS: float = 1.25
+    BOARDING_BUFFER_SECONDS: int = 30
+
 
 settings = Settings()

@@ -35,7 +35,7 @@ class Notification(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('reroute','eta_change','depart','arrive','notice')",
+            "type IN ('reroute','eta_change','depart','arrive','notice','transfer','alight')",
             name="notifications_type",
         ),
         CheckConstraint(

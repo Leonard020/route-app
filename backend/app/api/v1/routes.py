@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status
 from app.core.response import Envelope
-from app.deps.auth import get_current_user, get_current_user_optional
+from app.deps.auth import get_current_user_optional
 from app.schemas.route import (
     RouteRecommendRequest, RouteRecommendResponse,
     RerouteRequest, RerouteResponse, FeedbackCreate,
@@ -18,6 +18,12 @@ async def recommend(
 ):
     result = await svc.recommend(payload, user)
     return Envelope(data=result["data"], meta=result["meta"])
+
+
+@router.post("/{route_id}/refresh", response_model=Envelope[RerouteResponse])
+async def refresh_route(route_id: str, svc: RouteService = Depends()):
+    data = await svc.refresh(route_id)
+    return Envelope(data=data)
 
 
 @router.get("/{route_id}", response_model=Envelope[dict])

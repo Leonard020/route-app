@@ -28,6 +28,11 @@ class UserPreference(Base):
     eco_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     max_walk_min: Mapped[int] = mapped_column(Integer, nullable=False, server_default="20")
     notify_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    walk_speed: Mapped[str] = mapped_column(String(20), nullable=False, server_default="normal")
+    route_sort: Mapped[str] = mapped_column(String(20), nullable=False, server_default="fastest")
+    alert_alight: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    alert_transfer: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    alert_minutes_before: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     dnd_start: Mapped[Optional[time]] = mapped_column(Time)
     dnd_end: Mapped[Optional[time]] = mapped_column(Time)
     updated_at: Mapped[datetime] = mapped_column(
@@ -40,5 +45,13 @@ class UserPreference(Base):
         CheckConstraint(
             "preferred_mode IN ('walk','car','transit','bike','multi')",
             name="pref_mode",
+        ),
+        CheckConstraint(
+            "walk_speed IN ('slow','normal','fast')",
+            name="pref_walk_speed",
+        ),
+        CheckConstraint(
+            "route_sort IN ('fastest','min_transfer','min_walk')",
+            name="pref_route_sort",
         ),
     )

@@ -21,6 +21,7 @@ class AuthService:
             raise ValidationError("email already exists", {"field": "email"})
 
         from app.models.user import User
+        from app.models.user_preference import UserPreference
         user = User(
             email=payload.email,
             nickname=payload.nickname,
@@ -28,6 +29,8 @@ class AuthService:
             provider=payload.provider,
         )
         await self.users.add(user)
+        await self.db.flush()
+        self.db.add(UserPreference(user_id=user.id))
         await self.db.commit()
 
         return {
