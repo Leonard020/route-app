@@ -16,6 +16,7 @@ from app.models.subway_line import SubwayLine
 from app.models.subway_station import SubwayStation
 from app.models.subway_station_transfer import SubwayStationTransfer
 from app.models.subway_realtime_arrival import SubwayRealtimeArrival
+from app.models.guidance_session import GuidanceSession
 from app.models.bus_city_code import BusCityCode
 from app.models.bus_realtime_arrival import BusRealtimeArrival
 
@@ -25,5 +26,5 @@ __all__ = [
     "Notification", "Feedback", "Prediction", "ApiKey",
     "RawPublicData", "DataSyncLog",
     "SubwayLine", "SubwayStation", "SubwayStationTransfer", "SubwayRealtimeArrival",
-    "BusCityCode", "BusRealtimeArrival",
+    "BusCityCode", "BusRealtimeArrival", "GuidanceSession",
 ]

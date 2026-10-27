@@ -1,14 +1,20 @@
 from typing import List, Dict, Any, Optional, Tuple
 from app.engines.graph import GraphProvider
 from app.core.settings import settings
+from app.domain.geo import haversine_m, walk_seconds
+
+
+def _raw(place) -> dict:
+    data = dict(place.raw or {})
+    data.setdefault("name", place.name)
+    data.setdefault("place_id", str(place.id))
+    data.setdefault("lat", place.lat)
+    data.setdefault("lng", place.lng)
+    data.setdefault("external_id", place.external_id)
+    return data
 
 
 class Router:
-    """
-    대중교통 후보 경로 탐색.
-    버스(TAGO)·지하철(서울시 실시간 도착정보) 구간을 후보에 포함한다.
-    """
-
     def __init__(self, graph: GraphProvider):
         self.graph = graph
 
@@ -22,180 +28,196 @@ class Router:
     ) -> List[Dict[str, Any]]:
         o_lat, o_lng = origin
         d_lat, d_lng = destination
-        city = settings.DEFAULT_BUS_CITY_CODE
         prefs = preferences or {}
-        walk_factor = {"slow": 1.4, "normal": 1.0, "fast": 0.75}.get(
-            prefs.get("walk_speed") or "normal", 1.0
-        )
+        speed = prefs.get("walk_speed") or "normal"
+        city = settings.DEFAULT_BUS_CITY_CODE
+        max_walk_m = int(prefs.get("max_walk_min") or 20) * 60 * 1.25
 
-        def walk_s(base: int) -> int:
-            return max(int(base * walk_factor), 1)
+        bus_o = await self.graph.nearest_place(o_lat, o_lng, "bus")
+        bus_d = await self.graph.nearest_place(d_lat, d_lng, "bus")
+        sub_o = await self.graph.nearest_place(o_lat, o_lng, "subway")
+        sub_d = await self.graph.nearest_place(d_lat, d_lng, "subway")
 
-        bus_candidate = {
+        candidates: list[dict] = []
+        if mode in ("transit", "multi", "walk"):
+            if bus_o and bus_d:
+                cand = self._bus_candidate(o_lat, o_lng, d_lat, d_lng, bus_o, bus_d, speed, city)
+                if cand["walk_distance_m"] <= max_walk_m * 2:
+                    candidates.append(cand)
+            if sub_o and sub_d:
+                cand = self._subway_candidate(o_lat, o_lng, d_lat, d_lng, sub_o, sub_d, speed)
+                if cand["walk_distance_m"] <= max_walk_m * 2:
+                    candidates.append(cand)
+            if bus_o and sub_d:
+                mid_bus = bus_d or bus_o
+                mid_sub = sub_o or sub_d
+                candidates.append(
+                    self._mixed_candidate(
+                        o_lat, o_lng, d_lat, d_lng, bus_o, mid_bus, mid_sub, sub_d, speed, city
+                    )
+                )
+
+        if not candidates and mode in ("transit", "multi", "walk"):
+            return []
+        return candidates[: max(top_k, 1)]
+
+    def _bus_candidate(self, o_lat, o_lng, d_lat, d_lng, bus_o, bus_d, speed, city) -> dict:
+        w1 = haversine_m(o_lat, o_lng, bus_o.lat, bus_o.lng)
+        w2 = haversine_m(bus_d.lat, bus_d.lng, d_lat, d_lng)
+        ride = max(haversine_m(bus_o.lat, bus_o.lng, bus_d.lat, bus_d.lng), 400)
+        raw_o, raw_d = _raw(bus_o), _raw(bus_d)
+        return {
             "candidate_id": "cand-bus-1",
-            "total_distance_m": 9800,
+            "total_distance_m": int(w1 + ride + w2),
             "total_cost": 1500,
             "transfer_count": 0,
-            "walk_distance_m": 700,
+            "walk_distance_m": int(w1 + w2),
             "carbon_g": 280,
             "polyline": None,
             "segments": [
-                {"distance_m": 400, "road_type": "walk", "congestion": 1},
-                {"distance_m": 8700, "road_type": "bus", "congestion": 2},
-                {"distance_m": 700, "road_type": "walk", "congestion": 1},
+                {"distance_m": int(w1), "road_type": "walk", "congestion": 1},
+                {"distance_m": int(ride), "road_type": "bus", "congestion": 2},
+                {"distance_m": int(w2), "road_type": "walk", "congestion": 1},
             ],
             "steps": [
-                {
-                    "mode": "walk",
-                    "instruction": "출발지에서 버스 정류장까지 도보",
-                    "distance_m": 400,
-                    "duration_s": walk_s(320),
-                    "start": {"lat": o_lat, "lng": o_lng},
-                    "end": {"lat": o_lat + 0.001, "lng": o_lng + 0.001},
-                },
+                self._walk("출발지에서 버스 정류장까지 도보", o_lat, o_lng, bus_o.lat, bus_o.lng, w1, speed),
                 {
                     "mode": "bus",
-                    "instruction": "버스 승차",
-                    "distance_m": 8700,
-                    "duration_s": 1500,
-                    "start": {"lat": o_lat + 0.001, "lng": o_lng + 0.001},
-                    "end": {"lat": d_lat - 0.001, "lng": d_lng - 0.001},
+                    "instruction": f"{raw_o.get('name')}에서 버스 승차",
+                    "distance_m": int(ride),
+                    "duration_s": max(int(ride / 6.0), 60),
+                    "start": {"lat": bus_o.lat, "lng": bus_o.lng},
+                    "end": {"lat": bus_d.lat, "lng": bus_d.lng},
                     "transit_info": {
-                        "city_code": city,
-                        "node_id": None,
-                        "route_id": None,
-                        "route_no": None,
+                        "city_code": str(raw_o.get("city_code") or city),
+                        "node_id": raw_o.get("node_id") or raw_o.get("external_id"),
+                        "route_id": raw_o.get("route_id"),
+                        "route_no": raw_o.get("route_no"),
+                        "board_stop": raw_o.get("name"),
+                        "alight_stop": raw_d.get("name"),
                         "source": "tago",
                         "service": "getSttnAcctoArvlPrearngeInfoList",
                     },
                 },
-                {
-                    "mode": "walk",
-                    "instruction": "하차 정류장에서 목적지까지 도보",
-                    "distance_m": 700,
-                    "duration_s": walk_s(560),
-                    "start": {"lat": d_lat - 0.001, "lng": d_lng - 0.001},
-                    "end": {"lat": d_lat, "lng": d_lng},
-                },
+                self._walk("하차 정류장에서 목적지까지 도보", bus_d.lat, bus_d.lng, d_lat, d_lng, w2, speed),
             ],
         }
 
-        subway_candidate = {
+    def _subway_candidate(self, o_lat, o_lng, d_lat, d_lng, sub_o, sub_d, speed) -> dict:
+        w1 = haversine_m(o_lat, o_lng, sub_o.lat, sub_o.lng)
+        w2 = haversine_m(sub_d.lat, sub_d.lng, d_lat, d_lng)
+        ride = max(haversine_m(sub_o.lat, sub_o.lng, sub_d.lat, sub_d.lng), 400)
+        raw_o, raw_d = _raw(sub_o), _raw(sub_d)
+        station_name = (raw_o.get("station_name") or raw_o.get("name") or "").replace("역", "")
+        return {
             "candidate_id": "cand-subway-1",
-            "total_distance_m": 11200,
+            "total_distance_m": int(w1 + ride + w2),
             "total_cost": 1500,
-            "transfer_count": 1,
-            "walk_distance_m": 900,
+            "transfer_count": 1 if raw_o.get("subway_id") != raw_d.get("subway_id") else 0,
+            "walk_distance_m": int(w1 + w2),
             "carbon_g": 160,
             "polyline": None,
             "segments": [
-                {"distance_m": 500, "road_type": "walk", "congestion": 1},
-                {"distance_m": 9800, "road_type": "subway", "congestion": 1},
-                {"distance_m": 900, "road_type": "walk", "congestion": 1},
+                {"distance_m": int(w1), "road_type": "walk", "congestion": 1},
+                {"distance_m": int(ride), "road_type": "subway", "congestion": 1},
+                {"distance_m": int(w2), "road_type": "walk", "congestion": 1},
             ],
             "steps": [
-                {
-                    "mode": "walk",
-                    "instruction": "출발지에서 지하철역까지 도보",
-                    "distance_m": 500,
-                    "duration_s": walk_s(400),
-                    "start": {"lat": o_lat, "lng": o_lng},
-                    "end": {"lat": o_lat + 0.002, "lng": o_lng + 0.002},
-                },
+                self._walk("출발지에서 지하철역까지 도보", o_lat, o_lng, sub_o.lat, sub_o.lng, w1, speed),
                 {
                     "mode": "subway",
-                    "instruction": "지하철 승차",
-                    "distance_m": 9800,
-                    "duration_s": 1320,
-                    "start": {"lat": o_lat + 0.002, "lng": o_lng + 0.002},
-                    "end": {"lat": d_lat - 0.002, "lng": d_lng - 0.002},
+                    "instruction": f"{raw_o.get('name')}에서 지하철 승차",
+                    "distance_m": int(ride),
+                    "duration_s": max(int(ride / 9.0), 60),
+                    "start": {"lat": sub_o.lat, "lng": sub_o.lng},
+                    "end": {"lat": sub_d.lat, "lng": sub_d.lng},
                     "transit_info": {
-                        "subway_id": None,
-                        "station_id": None,
-                        "station_name": None,
-                        "updn_line": None,
+                        "subway_id": raw_o.get("subway_id"),
+                        "station_id": raw_o.get("station_id") or raw_o.get("external_id"),
+                        "station_name": station_name or None,
+                        "updn_line": raw_o.get("updn_line"),
+                        "board_station": raw_o.get("name"),
+                        "alight_station": raw_d.get("name"),
                         "source": "seoul_subway",
                         "service": "realtimeStationArrival/ALL",
                     },
                 },
-                {
-                    "mode": "walk",
-                    "instruction": "하차역에서 목적지까지 도보",
-                    "distance_m": 900,
-                    "duration_s": walk_s(720),
-                    "start": {"lat": d_lat - 0.002, "lng": d_lng - 0.002},
-                    "end": {"lat": d_lat, "lng": d_lng},
-                },
+                self._walk("하차역에서 목적지까지 도보", sub_d.lat, sub_d.lng, d_lat, d_lng, w2, speed),
             ],
         }
 
-        mixed = {
+    def _mixed_candidate(
+        self, o_lat, o_lng, d_lat, d_lng, bus_o, bus_mid, sub_mid, sub_d, speed, city
+    ) -> dict:
+        w1 = haversine_m(o_lat, o_lng, bus_o.lat, bus_o.lng)
+        ride1 = max(haversine_m(bus_o.lat, bus_o.lng, bus_mid.lat, bus_mid.lng), 300)
+        tw = haversine_m(bus_mid.lat, bus_mid.lng, sub_mid.lat, sub_mid.lng)
+        ride2 = max(haversine_m(sub_mid.lat, sub_mid.lng, sub_d.lat, sub_d.lng), 300)
+        w2 = haversine_m(sub_d.lat, sub_d.lng, d_lat, d_lng)
+        raw_bo, raw_bm = _raw(bus_o), _raw(bus_mid)
+        raw_sm, raw_sd = _raw(sub_mid), _raw(sub_d)
+        station_name = (raw_sm.get("station_name") or raw_sm.get("name") or "").replace("역", "")
+        return {
             "candidate_id": "cand-mixed-1",
-            "total_distance_m": 10800,
+            "total_distance_m": int(w1 + ride1 + tw + ride2 + w2),
             "total_cost": 3000,
             "transfer_count": 1,
-            "walk_distance_m": 1100,
+            "walk_distance_m": int(w1 + tw + w2),
             "carbon_g": 220,
             "polyline": None,
             "segments": [
-                {"distance_m": 400, "road_type": "walk", "congestion": 1},
-                {"distance_m": 4200, "road_type": "bus", "congestion": 2},
-                {"distance_m": 300, "road_type": "walk", "congestion": 1},
-                {"distance_m": 4800, "road_type": "subway", "congestion": 1},
-                {"distance_m": 1100, "road_type": "walk", "congestion": 1},
+                {"distance_m": int(w1), "road_type": "walk", "congestion": 1},
+                {"distance_m": int(ride1), "road_type": "bus", "congestion": 2},
+                {"distance_m": int(tw), "road_type": "walk", "congestion": 1},
+                {"distance_m": int(ride2), "road_type": "subway", "congestion": 1},
+                {"distance_m": int(w2), "road_type": "walk", "congestion": 1},
             ],
             "steps": [
-                {
-                    "mode": "walk",
-                    "instruction": "출발지에서 버스 정류장까지 도보",
-                    "distance_m": 400,
-                    "duration_s": walk_s(320),
-                    "start": {"lat": o_lat, "lng": o_lng},
-                    "end": {"lat": o_lat + 0.001, "lng": o_lng},
-                },
+                self._walk("출발지에서 버스 정류장까지 도보", o_lat, o_lng, bus_o.lat, bus_o.lng, w1, speed),
                 {
                     "mode": "bus",
                     "instruction": "버스로 환승역 이동",
-                    "distance_m": 4200,
-                    "duration_s": 900,
-                    "start": {"lat": o_lat + 0.001, "lng": o_lng},
-                    "end": {"lat": (o_lat + d_lat) / 2, "lng": (o_lng + d_lng) / 2},
+                    "distance_m": int(ride1),
+                    "duration_s": max(int(ride1 / 6.0), 60),
+                    "start": {"lat": bus_o.lat, "lng": bus_o.lng},
+                    "end": {"lat": bus_mid.lat, "lng": bus_mid.lng},
                     "transit_info": {
-                        "city_code": city,
-                        "node_id": None,
-                        "route_id": None,
+                        "city_code": str(raw_bo.get("city_code") or city),
+                        "node_id": raw_bo.get("node_id") or raw_bo.get("external_id"),
+                        "board_stop": raw_bo.get("name"),
+                        "alight_stop": raw_bm.get("name"),
                         "source": "tago",
                         "service": "getSttnAcctoArvlPrearngeInfoList",
                     },
                 },
-                {
-                    "mode": "walk",
-                    "instruction": "버스 하차 후 지하철 환승 도보",
-                    "distance_m": 300,
-                    "duration_s": walk_s(240),
-                    "start": {"lat": (o_lat + d_lat) / 2, "lng": (o_lng + d_lng) / 2},
-                    "end": {"lat": (o_lat + d_lat) / 2 + 0.0005, "lng": (o_lng + d_lng) / 2},
-                },
+                self._walk("버스 하차 후 지하철 환승 도보", bus_mid.lat, bus_mid.lng, sub_mid.lat, sub_mid.lng, tw, speed),
                 {
                     "mode": "subway",
                     "instruction": "지하철 승차",
-                    "distance_m": 4800,
-                    "duration_s": 720,
-                    "start": {"lat": (o_lat + d_lat) / 2 + 0.0005, "lng": (o_lng + d_lng) / 2},
-                    "end": {"lat": d_lat - 0.001, "lng": d_lng - 0.001},
+                    "distance_m": int(ride2),
+                    "duration_s": max(int(ride2 / 9.0), 60),
+                    "start": {"lat": sub_mid.lat, "lng": sub_mid.lng},
+                    "end": {"lat": sub_d.lat, "lng": sub_d.lng},
                     "transit_info": {
+                        "subway_id": raw_sm.get("subway_id"),
+                        "station_id": raw_sm.get("station_id") or raw_sm.get("external_id"),
+                        "station_name": station_name or None,
+                        "board_station": raw_sm.get("name"),
+                        "alight_station": raw_sd.get("name"),
                         "source": "seoul_subway",
                         "service": "realtimeStationArrival/ALL",
                     },
                 },
-                {
-                    "mode": "walk",
-                    "instruction": "하차역에서 목적지까지 도보",
-                    "distance_m": 1100,
-                    "duration_s": walk_s(880),
-                    "start": {"lat": d_lat - 0.001, "lng": d_lng - 0.001},
-                    "end": {"lat": d_lat, "lng": d_lng},
-                },
+                self._walk("하차역에서 목적지까지 도보", sub_d.lat, sub_d.lng, d_lat, d_lng, w2, speed),
             ],
         }
-        return [bus_candidate, subway_candidate, mixed][: max(top_k, 3)]
+
+    def _walk(self, instruction, slat, slng, elat, elng, dist, speed) -> dict:
+        return {
+            "mode": "walk",
+            "instruction": instruction,
+            "distance_m": int(dist),
+            "duration_s": walk_seconds(dist, speed),
+            "start": {"lat": slat, "lng": slng},
+            "end": {"lat": elat, "lng": elng},
+        }

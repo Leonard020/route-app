@@ -4,7 +4,10 @@ from typing import Optional
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from uuid import UUID
 from app.core.errors import NotFoundError, ExternalServiceError, ValidationError
+from app.domain import messages
+from app.domain.timing import VehicleOption, pick_boardable, pick_transfer, summarize_durations
 from app.core.response import Meta
 from app.db.session import get_db
 from app.deps.predictor import get_predictor
@@ -55,7 +58,7 @@ class RouteService:
             abs(payload.origin.lat - payload.destination.lat) < 1e-6
             and abs(payload.origin.lng - payload.destination.lng) < 1e-6
         ):
-            raise ValidationError("출발지와 다른 목적지를 선택해주세요.")
+            raise ValidationError(messages.SAME_ORIGIN_DEST)
 
         # 1) 후보 경로 탐색
         candidates = await self.router.find_candidates(
@@ -66,7 +69,7 @@ class RouteService:
             preferences=payload.preferences.model_dump() if payload.preferences else None,
         )
         if not candidates:
-            raise NotFoundError("no route found")
+            raise NotFoundError(messages.NO_ROUTE)
 
         realtime_meta = await self._apply_realtime(candidates)
 
@@ -146,8 +149,8 @@ class RouteService:
 
             route_model = RouteModel(
                 user_id=user.id if user else None,
-                origin_place_id=payload.origin.place_id,
-                dest_place_id=payload.destination.place_id,
+                origin_place_id=_as_uuid(payload.origin.place_id),
+                dest_place_id=_as_uuid(payload.destination.place_id),
                 origin_lat=payload.origin.lat,
                 origin_lng=payload.origin.lng,
                 dest_lat=payload.destination.lat,
@@ -165,6 +168,9 @@ class RouteService:
                 predictor_version=eta.model_version,
             )
             steps_payload = self._to_steps_payload(c.get("steps", []))
+            parts = summarize_durations(steps_payload)
+            route_model.total_duration_s = parts["total_duration_s"] or eta.total_duration_s
+            route_model.eta = datetime.now(timezone.utc) + timedelta(seconds=route_model.total_duration_s)
             await self.routes.add_with_steps(route_model, steps_payload)
             await self.db.commit()
 
@@ -182,6 +188,13 @@ class RouteService:
                     eta=route_model.eta,
                     realtime_used=realtime_meta.get("used", False),
                     last_fetched_at=realtime_meta.get("fetched_at"),
+                    walk_duration_s=parts["walk_duration_s"],
+                    wait_duration_s=parts["wait_duration_s"],
+                    vehicle_duration_s=parts["vehicle_duration_s"],
+                    transfer_walk_s=parts["transfer_walk_s"],
+                    transfer_wait_s=parts["transfer_wait_s"],
+                    label=messages.FASTEST if rank_item.rank == 1 else None,
+                    time_basis=messages.TIMETABLE if not realtime_meta.get("used") else None,
                 ),
                 polyline=route_model.polyline,
                 steps=[RouteStep(**s) for s in steps_payload] if (payload.options and payload.options.include_steps) else [],
@@ -288,62 +301,130 @@ class RouteService:
         fetched_at = None
         bus_svc = BusService(self.db)
         subway_svc = SubwayService(self.db)
+        buffer = settings.BOARDING_BUFFER_SECONDS
         for cand in candidates:
             extra_wait = 0
-            for step in cand.get("steps", []):
+            elapsed = 0
+            first_transit = True
+            steps = cand.get("steps", [])
+            for i, step in enumerate(steps):
                 info = step.get("transit_info") or {}
                 mode = step.get("mode")
-                try:
-                    if mode == "bus" and info.get("node_id"):
-                        result = await bus_svc.arrivals(
-                            city_code=str(info.get("city_code") or settings.DEFAULT_BUS_CITY_CODE),
-                            node_id=str(info["node_id"]),
-                            route_id=info.get("route_id"),
-                        )
-                        waits = [i.arr_time_seconds for i in result.items if i.arr_time_seconds is not None]
-                        wait = min(waits) if waits else None
-                        if wait is not None and wait >= settings.BOARDING_BUFFER_SECONDS:
-                            extra_wait += wait
-                            step["duration_s"] = int(step.get("duration_s") or 0) + wait
-                            info["realtime"] = True
-                            info["arr_time_seconds"] = wait
-                            fetched_at = result.fetched_at
-                            used = True
-                        else:
-                            info["realtime"] = False
-                            info["fallback"] = "timetable"
-                    elif mode == "subway" and (info.get("station_name") or info.get("station_id")):
-                        result = await subway_svc.arrivals(
-                            station_name=info.get("station_name"),
-                            subway_id=info.get("subway_id"),
-                            station_id=info.get("station_id"),
-                            updn_line=info.get("updn_line"),
-                        )
-                        waits = [i.arrival_seconds for i in result.items if i.arrival_seconds is not None]
-                        wait = min(waits) if waits else None
-                        if wait is not None:
-                            extra_wait += wait
-                            step["duration_s"] = int(step.get("duration_s") or 0) + wait
-                            info["realtime"] = True
-                            info["arrival_seconds"] = wait
-                            fetched_at = result.fetched_at
-                            used = True
-                        else:
-                            info["realtime"] = False
-                            info["fallback"] = "timetable"
-                except ExternalServiceError:
-                    info["realtime"] = False
-                    info["fallback"] = "unavailable"
-                step["transit_info"] = info
-            if extra_wait:
-                cand["realtime_wait_s"] = extra_wait
+                prev_walk = int(steps[i - 1].get("duration_s") or 0) if i and steps[i - 1].get("mode") == "walk" else 0
+                if mode in ("bus", "subway"):
+                    vehicles, fetched, live = await self._load_vehicles(mode, info, bus_svc, subway_svc)
+                    if fetched:
+                        fetched_at = fetched
+                    decision = (
+                        pick_boardable(vehicles, prev_walk, buffer)
+                        if first_transit
+                        else pick_transfer(vehicles, elapsed, prev_walk, buffer)
+                    )
+                    wait = getattr(decision, "wait_seconds", None)
+                    ok = getattr(decision, "boardable", None)
+                    if ok is None:
+                        ok = decision.connected
+                    if ok and wait is not None:
+                        extra_wait += wait
+                        step["duration_s"] = int(step.get("duration_s") or 0) + wait
+                        info["wait_seconds"] = wait
+                        info["boardable"] = True
+                        info["realtime"] = live
+                        info["fallback"] = None if live else "timetable"
+                        if getattr(decision, "risk", False):
+                            info["transfer_risk"] = True
+                            info["warning"] = messages.TRANSFER_RISK
+                        if decision.vehicle:
+                            info.update(decision.vehicle.meta)
+                        used = used or live
+                        first_transit = False
+                    else:
+                        info["boardable"] = False
+                        info["realtime"] = live
+                        info["fallback"] = "timetable" if vehicles else "unavailable"
+                        info["reason"] = decision.reason
+                    step["transit_info"] = info
+                elapsed += int(step.get("duration_s") or 0)
+            cand["realtime_wait_s"] = extra_wait
+            cand["time_parts"] = summarize_durations(steps)
         return {"used": used, "fetched_at": fetched_at}
 
+    async def _load_vehicles(self, mode: str, info: dict, bus_svc, subway_svc):
+        vehicles: list[VehicleOption] = []
+        fetched_at = None
+        live = False
+        try:
+            if mode == "bus" and info.get("node_id"):
+                result = await bus_svc.arrivals(
+                    city_code=str(info.get("city_code") or settings.DEFAULT_BUS_CITY_CODE),
+                    node_id=str(info["node_id"]),
+                    route_id=info.get("route_id"),
+                )
+                fetched_at = result.fetched_at
+                live = result.realtime
+                for item in result.items:
+                    if item.arr_time_seconds is None:
+                        continue
+                    vehicles.append(VehicleOption(
+                        item.arr_time_seconds,
+                        {
+                            "arr_time_seconds": item.arr_time_seconds,
+                            "route_no": item.route_no,
+                            "route_id": item.route_id,
+                            "vehicle_type": item.vehicle_type,
+                            "arr_prev_station_cnt": item.arr_prev_station_cnt,
+                            "last_fetched_at": result.last_fetched_at or result.fetched_at,
+                        },
+                    ))
+            elif mode == "subway" and (info.get("station_name") or info.get("station_id")):
+                result = await subway_svc.arrivals(
+                    station_name=info.get("station_name"),
+                    subway_id=info.get("subway_id"),
+                    station_id=info.get("station_id"),
+                    updn_line=info.get("updn_line"),
+                )
+                fetched_at = result.fetched_at
+                live = result.realtime
+                for item in result.items:
+                    if item.arrival_seconds is None:
+                        continue
+                    if item.is_last_car:
+                        meta_extra = {"is_last_car": True}
+                    else:
+                        meta_extra = {}
+                    vehicles.append(VehicleOption(
+                        item.arrival_seconds,
+                        {
+                            "arrival_seconds": item.arrival_seconds,
+                            "train_no": item.train_no,
+                            "train_type": item.train_type,
+                            "train_line_nm": item.train_line_nm,
+                            "arrival_code": item.arrival_code,
+                            "arrival_code_name": item.arrival_code_name,
+                            "is_last_car": item.is_last_car,
+                            "last_fetched_at": result.last_fetched_at or result.fetched_at,
+                            **meta_extra,
+                        },
+                    ))
+        except ExternalServiceError:
+            return [], fetched_at, False
+        return vehicles, fetched_at, live
+
     def _serialize_route(self, route: RouteModel) -> dict:
+        parts = summarize_durations([
+            {
+                "step_order": s.step_order,
+                "mode": s.mode,
+                "duration_s": s.duration_s,
+                "transit_info": s.transit_info or {},
+            }
+            for s in route.steps
+        ])
         return {
             "route_id": str(route.id),
             "mode": route.mode,
             "summary": {
+                **parts,
                 "total_distance_m": route.total_distance_m,
                 "total_duration_s": route.total_duration_s,
                 "total_cost": route.total_cost,
@@ -375,3 +456,12 @@ class RouteService:
             "deviation": "경로 이탈 보정",
             "manual": "사용자 요청",
         }.get(reason, "재탐색")
+
+
+def _as_uuid(value) -> UUID | None:
+    if not value:
+        return None
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None

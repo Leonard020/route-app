@@ -45,6 +45,13 @@ class RouteSummary(BaseModel):
     eta: Optional[datetime] = None
     realtime_used: bool = False
     last_fetched_at: Optional[datetime] = None
+    walk_duration_s: int = 0
+    wait_duration_s: int = 0
+    vehicle_duration_s: int = 0
+    transfer_walk_s: int = 0
+    transfer_wait_s: int = 0
+    label: Optional[str] = None
+    time_basis: Optional[str] = None
 
 
 class RouteStep(BaseModel):

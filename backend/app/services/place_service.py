@@ -27,22 +27,50 @@ class PlaceService:
         user=None,
     ) -> dict:
         items = await self.places.search(q, lat=lat, lng=lng, radius_m=radius_m, limit=limit)
+        stations = await self.places.search_stations(q, limit=limit)
         if user:
             await self.recent.add(user_id=user.id, keyword=q, lat=lat, lng=lng)
             await self.db.commit()
+        payload = [
+            {
+                "id": str(p.id),
+                "name": p.name,
+                "address": p.address,
+                "category": p.category,
+                "lat": p.lat,
+                "lng": p.lng,
+            }
+            for p in items
+        ]
+        known = {(p.name, p.lat, p.lng) for p in items}
+        for st in stations:
+            if not st.lat or not st.lng:
+                payload.append({
+                    "id": st.station_id,
+                    "name": st.station_name,
+                    "address": st.line_name or "",
+                    "category": "subway",
+                    "lat": st.lat,
+                    "lng": st.lng,
+                    "station_id": st.station_id,
+                    "subway_id": st.subway_id,
+                })
+                continue
+            if (st.station_name, st.lat, st.lng) in known:
+                continue
+            payload.append({
+                "id": st.station_id,
+                "name": st.station_name,
+                "address": st.line_name or "",
+                "category": "subway",
+                "lat": st.lat,
+                "lng": st.lng,
+                "station_id": st.station_id,
+                "subway_id": st.subway_id,
+            })
         return {
-            "items": [
-                {
-                    "id": str(p.id),
-                    "name": p.name,
-                    "address": p.address,
-                    "category": p.category,
-                    "lat": p.lat,
-                    "lng": p.lng,
-                }
-                for p in items
-            ],
-            "message": None if items else "검색 결과가 없습니다. 다른 검색어로 입력해주세요.",
+            "items": payload[:limit],
+            "message": None if payload else "검색 결과가 없습니다. 다른 검색어로 입력해주세요.",
         }
 
     async def recent(self, user=None) -> dict:
@@ -81,7 +109,11 @@ class PlaceService:
         return {"deleted": True}
 
     async def get_detail(self, place_id) -> dict:
-        p = await self.places.get(place_id)
+        from uuid import UUID
+        try:
+            p = await self.places.get(UUID(str(place_id)))
+        except ValueError:
+            p = None
         if not p:
             raise NotFoundError("place not found")
         return {

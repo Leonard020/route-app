@@ -29,6 +29,12 @@ async def search_places(
     return Envelope(data=data)
 
 
+@router.get("/{place_id}")
+async def place_detail(place_id: str, svc: PlaceService = Depends()):
+    data = await svc.get_detail(place_id)
+    return Envelope(data=data)
+
+
 @router.delete("/recent/{recent_id}")
 async def delete_recent(
     recent_id: str,

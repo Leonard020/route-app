@@ -1,4 +1,5 @@
 from typing import Optional, Sequence
+from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from app.models.route import Route
@@ -13,7 +14,7 @@ class RouteRepository(BaseRepository[Route]):
     async def get_with_steps(self, route_id) -> Optional[Route]:
         q = (
             select(Route)
-            .where(Route.id == route_id)
+            .where(Route.id == UUID(str(route_id)))
             .options(selectinload(Route.steps).selectinload(RouteStep.segments))
         )
         return (await self.session.execute(q)).scalar_one_or_none()
