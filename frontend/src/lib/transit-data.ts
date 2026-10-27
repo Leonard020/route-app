@@ -1,4 +1,4 @@
-export type Place = { name: string; detail: string; lat: number; lng: number };
+export type Place = { name: string; detail: string; lat: number; lng: number; place_id?: string };
 
 export const PLACES: Place[] = [
   { name: "강남역", detail: "서울 강남구 · 2호선·신분당선", lat: 37.4979, lng: 127.0276 },

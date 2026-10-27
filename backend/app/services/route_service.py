@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from uuid import UUID
+from uuid import UUID, uuid4
 from app.core.errors import NotFoundError, ExternalServiceError, ValidationError
 from app.domain import messages
 from app.domain.timing import VehicleOption, pick_boardable, pick_transfer, summarize_durations
@@ -100,15 +100,18 @@ class RouteService:
                     update={"total_duration_s": eta_resp.total_duration_s + wait}
                 )
             eta_results.append(eta_resp)
-            await self.predictions.log(
-                route_id=None,
-                predictor_version=eta_resp.model_version,
-                kind="eta",
-                request={"segments": [s.model_dump() for s in segments]},
-                response=eta_resp.model_dump(mode="json"),
-                latency_ms=int((time.perf_counter() - t0) * 1000),
-                fallback_used=eta_resp.fallback,
-            )
+            try:
+                await self.predictions.log(
+                    route_id=None,
+                    predictor_version=eta_resp.model_version,
+                    kind="eta",
+                    request={"segments": [s.model_dump() for s in segments]},
+                    response=eta_resp.model_dump(mode="json"),
+                    latency_ms=int((time.perf_counter() - t0) * 1000),
+                    fallback_used=eta_resp.fallback,
+                )
+            except Exception:
+                await self.db.rollback()
 
         # 3) 랭킹 (PredictorPort)
         rank_req = RankRequest(
@@ -171,11 +174,16 @@ class RouteService:
             parts = summarize_durations(steps_payload)
             route_model.total_duration_s = parts["total_duration_s"] or eta.total_duration_s
             route_model.eta = datetime.now(timezone.utc) + timedelta(seconds=route_model.total_duration_s)
-            await self.routes.add_with_steps(route_model, steps_payload)
-            await self.db.commit()
+            try:
+                await self.routes.add_with_steps(route_model, steps_payload)
+                await self.db.commit()
+                route_id = str(route_model.id)
+            except Exception:
+                await self.db.rollback()
+                route_id = str(uuid4())
 
             result_routes.append(RouteOut(
-                route_id=str(route_model.id),
+                route_id=route_id,
                 rank=rank_item.rank,
                 mode=payload.mode,
                 summary=RouteSummary(

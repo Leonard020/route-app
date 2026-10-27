@@ -1,6 +1,11 @@
-import type { Leg, RouteOption } from "@/lib/transit-data";
+import type { Leg, Place, RouteOption } from "@/lib/transit-data";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
+const API_BASE = String(import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
+
+function apiUrl(path: string): string {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${API_BASE}${p}`;
+}
 
 export type ApiPlace = {
   id: string;
@@ -36,9 +41,45 @@ async function readEnvelope<T>(res: Response): Promise<T> {
 }
 
 export async function searchPlaces(q: string): Promise<ApiPlace[]> {
-  const res = await fetch(`${API_BASE}/api/v1/places/search?q=${encodeURIComponent(q)}`);
+  const res = await fetch(apiUrl(`/api/v1/places/search?q=${encodeURIComponent(q)}`));
   const data = await readEnvelope<{ items: ApiPlace[] }>(res);
   return data.items ?? [];
+}
+
+export async function resolveCurrentPlace(): Promise<Place> {
+  const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("이 브라우저에서는 위치를 사용할 수 없습니다."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, () => reject(new Error("위치 권한이 거부되었습니다.")), {
+      enableHighAccuracy: true,
+      timeout: 8000,
+    });
+  });
+  const lat = pos.coords.latitude;
+  const lng = pos.coords.longitude;
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lng: String(lng),
+    accuracy_m: String(pos.coords.accuracy ?? ""),
+    permission: "true",
+  });
+  const res = await fetch(apiUrl(`/api/v1/location/current?${params.toString()}`));
+  const data = await readEnvelope<{
+    lat: number;
+    lng: number;
+    name: string;
+    address?: string | null;
+    place_id?: string;
+  }>(res);
+  return {
+    name: data.name || "현재 위치",
+    detail: data.address || "현재 위치",
+    lat: data.lat,
+    lng: data.lng,
+    place_id: data.place_id,
+  };
 }
 
 function lineColor(subwayId?: string | null, mode?: string): Leg["lineColor"] {
@@ -120,7 +161,7 @@ export async function recommendRoutes(
   destination: SelectedPlace,
   walkSpeed: "slow" | "normal" | "fast",
 ): Promise<RouteOption[]> {
-  const res = await fetch(`${API_BASE}/api/v1/routes/recommend`, {
+  const res = await fetch(apiUrl("/api/v1/routes/recommend"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -146,7 +187,7 @@ export async function recommendRoutes(
 }
 
 export async function startGuidance(routeId: string, origin: SelectedPlace): Promise<void> {
-  await fetch(`${API_BASE}/api/v1/guidance/start`, {
+  const res = await fetch(apiUrl("/api/v1/guidance/start"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -156,4 +197,5 @@ export async function startGuidance(routeId: string, origin: SelectedPlace): Pro
       current_location: { lat: origin.lat, lng: origin.lng, name: origin.name },
     }),
   });
+  await readEnvelope(res);
 }

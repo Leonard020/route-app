@@ -18,7 +18,13 @@ import {
   type RouteOption,
   type Speed,
 } from "@/lib/transit-data";
-import { recommendRoutes, searchPlaces, startGuidance, type SelectedPlace } from "@/lib/api";
+import {
+  recommendRoutes,
+  resolveCurrentPlace,
+  searchPlaces,
+  startGuidance,
+  type SelectedPlace,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -95,6 +101,7 @@ function PlaceField({
                 detail: p.address || p.category || "",
                 lat: p.lat,
                 lng: p.lng,
+                place_id: p.id,
               })),
           ),
         )
@@ -152,7 +159,7 @@ function PlaceField({
             <li className="px-3 py-3 text-[12px] text-muted-foreground">검색 결과가 없습니다</li>
           )}
           {results.map((p) => (
-            <li key={p.name}>
+            <li key={`${p.name}-${p.lat}-${p.lng}`}>
               <button
                 type="button"
                 onClick={() => {
@@ -230,7 +237,7 @@ function LegRow({ leg, speed, last }: { leg: Leg; speed: Speed; last: boolean })
 }
 
 function toSelected(p: Place): SelectedPlace {
-  return { name: p.name, detail: p.detail, lat: p.lat, lng: p.lng };
+  return { name: p.name, detail: p.detail, lat: p.lat, lng: p.lng, place_id: p.place_id };
 }
 
 function TransitPlanner() {
@@ -244,6 +251,8 @@ function TransitPlanner() {
   const [apiRoutes, setApiRoutes] = useState<RouteOption[] | null>(null);
   const [status, setStatus] = useState("");
   const [searching, setSearching] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [locating, setLocating] = useState(false);
 
   useEffect(() => {
     setNow(new Date());
@@ -273,7 +282,7 @@ function TransitPlanner() {
     return () => {
       cancelled = true;
     };
-  }, [originPlace, destinationPlace, speed]);
+  }, [originPlace, destinationPlace, speed, refreshTick]);
 
   const ranked = useMemo(
     () =>
@@ -348,6 +357,25 @@ function TransitPlanner() {
             </button>
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              disabled={locating}
+              onClick={() => {
+                setLocating(true);
+                void resolveCurrentPlace()
+                  .then((place) => {
+                    setOriginPlace(place);
+                    setStatus("");
+                  })
+                  .catch((err: Error) => {
+                    setStatus(err.message || "현재 위치를 가져오지 못했습니다.");
+                  })
+                  .finally(() => setLocating(false));
+              }}
+              className="rounded-full bg-ink px-2.5 py-1 text-[11px] font-medium text-paper disabled:opacity-60"
+            >
+              {locating ? "위치 확인 중…" : "현재 위치"}
+            </button>
             {["집 (망원동)", "회사 (역삼동)", "강남역", "성수역"].map((name) => (
               <button
                 key={name}
@@ -418,9 +446,19 @@ function TransitPlanner() {
         <section className="mt-5 animate-rise [animation-delay:200ms]">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-xs font-bold tracking-tight">경로 옵션</h2>
-            <span className="font-mono text-[10px] text-muted-foreground">
-              {searching ? "검색 중" : `${ranked.length}개`}
-            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={searching}
+                onClick={() => setRefreshTick((n) => n + 1)}
+                className="font-mono text-[10px] font-semibold text-lime-deep disabled:opacity-50"
+              >
+                {searching ? "검색 중" : "새로고침"}
+              </button>
+              <span className="font-mono text-[10px] text-muted-foreground">
+                {searching ? "검색 중" : `${ranked.length}개`}
+              </span>
+            </div>
           </div>
 
           <div className="space-y-3">
@@ -563,9 +601,15 @@ function TransitPlanner() {
         <button
           type="button"
           onClick={() => {
-            void startGuidance(detail.id, toSelected(originPlace)).catch(() => {
-              setStatus("길안내를 시작하지 못했습니다. 백엔드 연결을 확인하세요.");
-            });
+            if (!detail.fromApi) {
+              setStatus("실시간 경로를 찾은 뒤 출발할 수 있습니다.");
+              return;
+            }
+            void startGuidance(detail.id, toSelected(originPlace))
+              .then(() => setStatus("길안내를 시작했습니다."))
+              .catch((err: Error) => {
+                setStatus(err.message || "길안내를 시작하지 못했습니다.");
+              });
           }}
           className="mt-5 w-full rounded-2xl bg-lime py-3.5 text-[15px] font-bold text-primary-foreground animate-rise [animation-delay:380ms]"
         >

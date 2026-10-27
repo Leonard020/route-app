@@ -109,31 +109,33 @@ class BusService:
         finally:
             await client.aclose()
 
-        raw_row = await self._save_raw("tago_bus", service, raw, {
-            "cityCode": city_code, "nodeId": node_id, "routeId": route_id,
-            "numOfRows": num_of_rows, "pageNo": page_no,
-        })
         fetched_at = datetime.now(timezone.utc)
         items = [_item(row, city_code) for row in raw["items"] if row.get("nodeid") or row.get("nodeId")]
-
-        for item in items:
-            self.db.add(BusRealtimeArrival(
-                fetched_at=fetched_at,
-                city_code=item.city_code,
-                node_id=item.node_id,
-                node_name=item.node_name,
-                route_id=item.route_id,
-                route_no=item.route_no,
-                route_type=item.route_type,
-                arr_prev_station_cnt=item.arr_prev_station_cnt,
-                vehicle_type=item.vehicle_type,
-                arr_time_seconds=item.arr_time_seconds,
-                service=service,
-                raw_id=raw_row.id,
-            ))
-        raw_row.parsed_at = fetched_at
-        raw_row.record_count = len(items)
-        await self.db.commit()
+        try:
+            raw_row = await self._save_raw("tago_bus", service, raw, {
+                "cityCode": city_code, "nodeId": node_id, "routeId": route_id,
+                "numOfRows": num_of_rows, "pageNo": page_no,
+            })
+            for item in items:
+                self.db.add(BusRealtimeArrival(
+                    fetched_at=fetched_at,
+                    city_code=item.city_code,
+                    node_id=item.node_id,
+                    node_name=item.node_name,
+                    route_id=item.route_id,
+                    route_no=item.route_no,
+                    route_type=item.route_type,
+                    arr_prev_station_cnt=item.arr_prev_station_cnt,
+                    vehicle_type=item.vehicle_type,
+                    arr_time_seconds=item.arr_time_seconds,
+                    service=service,
+                    raw_id=raw_row.id,
+                ))
+            raw_row.parsed_at = fetched_at
+            raw_row.record_count = len(items)
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
 
         return BusArrivalResponse(
             city_code=city_code,

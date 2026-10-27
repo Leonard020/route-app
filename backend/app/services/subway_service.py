@@ -102,25 +102,27 @@ class SubwayService:
         if updn_line is not None:
             items = [i for i in items if i.updn_line == updn_line]
 
-        raw_row = None
         if persist:
-            raw_row = RawPublicData(
-                source="seoul_subway",
-                service="realtimeStationArrival/ALL",
-                request_url=raw.get("url"),
-                request_params={"START_INDEX": start_index, "END_INDEX": end_index},
-                http_status=raw.get("http_status"),
-                content_type=raw.get("content_type"),
-                body=raw.get("body"),
-                result_code=raw.get("result_code"),
-                result_message=raw.get("result_message"),
-                record_count=raw.get("record_count"),
-                parsed_at=fetched_at,
-            )
-            self.db.add(raw_row)
-            await self.db.flush()
-            await self._persist_items(raw["items"], raw_row.id, fetched_at)
-            await self.db.commit()
+            try:
+                raw_row = RawPublicData(
+                    source="seoul_subway",
+                    service="realtimeStationArrival/ALL",
+                    request_url=raw.get("url"),
+                    request_params={"START_INDEX": start_index, "END_INDEX": end_index},
+                    http_status=raw.get("http_status"),
+                    content_type=raw.get("content_type"),
+                    body=raw.get("body"),
+                    result_code=raw.get("result_code"),
+                    result_message=raw.get("result_message"),
+                    record_count=raw.get("record_count"),
+                    parsed_at=fetched_at,
+                )
+                self.db.add(raw_row)
+                await self.db.flush()
+                await self._persist_items(raw["items"], raw_row.id, fetched_at)
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
 
         last_dt = max((i.recptn_dt for i in items if i.recptn_dt), default=fetched_at)
         return SubwayArrivalResponse(

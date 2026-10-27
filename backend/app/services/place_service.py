@@ -3,6 +3,7 @@ from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.catalog.places import search_catalog
 from app.core.errors import NotFoundError
 from app.db.session import get_db
 from app.models.recent_search import RecentSearch
@@ -26,11 +27,17 @@ class PlaceService:
         limit: int = 20,
         user=None,
     ) -> dict:
-        items = await self.places.search(q, lat=lat, lng=lng, radius_m=radius_m, limit=limit)
-        stations = await self.places.search_stations(q, limit=limit)
-        if user:
-            await self.recent.add(user_id=user.id, keyword=q, lat=lat, lng=lng)
-            await self.db.commit()
+        items = []
+        stations = []
+        try:
+            items = list(await self.places.search(q, lat=lat, lng=lng, radius_m=radius_m, limit=limit))
+            stations = list(await self.places.search_stations(q, limit=limit))
+            if user:
+                await self.recent.add(user_id=user.id, keyword=q, lat=lat, lng=lng)
+                await self.db.commit()
+        except Exception:
+            items = []
+            stations = []
         payload = [
             {
                 "id": str(p.id),
@@ -68,6 +75,19 @@ class PlaceService:
                 "station_id": st.station_id,
                 "subway_id": st.subway_id,
             })
+        names = {row["name"] for row in payload}
+        for p in search_catalog(q, limit):
+            if p.name in names:
+                continue
+            payload.append({
+                "id": str(p.id),
+                "name": p.name,
+                "address": p.address,
+                "category": p.category,
+                "lat": p.lat,
+                "lng": p.lng,
+            })
+            names.add(p.name)
         return {
             "items": payload[:limit],
             "message": None if payload else "검색 결과가 없습니다. 다른 검색어로 입력해주세요.",

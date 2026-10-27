@@ -6,6 +6,8 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+const apiTarget = process.env.API_PROXY_TARGET || "http://127.0.0.1:8000";
+
 export default defineConfig({
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
@@ -15,7 +17,11 @@ export default defineConfig({
   vite: {
     server: {
       proxy: {
-        "/api": { target: "http://127.0.0.1:8000", changeOrigin: true },
+        "/api": { target: apiTarget, changeOrigin: true },
+        "/health": { target: apiTarget, changeOrigin: true },
+        "/docs": { target: apiTarget, changeOrigin: true },
+        "/redoc": { target: apiTarget, changeOrigin: true },
+        "/openapi.json": { target: apiTarget, changeOrigin: true },
       },
     },
   },
