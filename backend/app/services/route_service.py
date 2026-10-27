@@ -30,6 +30,7 @@ from app.services.subway_service import SubwayService
 from app.engines.router import Router
 from app.engines.graph import GraphProvider
 from app.engines.eta import ETAService
+from app.services.demand_service import DemandService
 
 
 class RouteService:
@@ -70,6 +71,9 @@ class RouteService:
         )
         if not candidates:
             raise NotFoundError(messages.NO_ROUTE)
+
+        depart = payload.depart_at or datetime.now(timezone.utc)
+        await DemandService(self.db).apply_to_candidates(candidates, depart.hour)
 
         realtime_meta = await self._apply_realtime(candidates)
 

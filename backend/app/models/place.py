@@ -20,6 +20,8 @@ class Place(Base):
         UUID(as_uuid=True), primary_key=True, server_default="uuid_generate_v4()"
     )
     external_id: Mapped[Optional[str]] = mapped_column(String(100))
+    standard_bus_stop_id: Mapped[Optional[str]] = mapped_column(String(20))
+    ars_id: Mapped[Optional[str]] = mapped_column(String(10))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     address: Mapped[str] = mapped_column(Text, nullable=False)
     road_address: Mapped[Optional[str]] = mapped_column(Text)
@@ -45,6 +47,8 @@ class Place(Base):
 
     __table_args__ = (
         Index("idx_places_external_id", "external_id"),
+        Index("idx_places_std_stop", "standard_bus_stop_id"),
+        Index("idx_places_ars", "ars_id"),
         Index(
             "idx_places_name_trgm", "name",
             postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"},

@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, DateTime, UniqueConstraint, Index
+from typing import Optional
+from sqlalchemy import String, Integer, DateTime, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
@@ -15,6 +16,8 @@ class SubwayStationTransfer(Base):
     station_id: Mapped[str] = mapped_column(String(20), nullable=False)
     transfer_subway_id: Mapped[str] = mapped_column(String(10), nullable=False)
     transfer_station_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    avg_transfer_s: Mapped[Optional[int]] = mapped_column(Integer)
+    sample_transfers: Mapped[Optional[int]] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default="now()"
     )

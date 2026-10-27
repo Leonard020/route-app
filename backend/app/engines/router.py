@@ -11,6 +11,9 @@ def _raw(place) -> dict:
     data.setdefault("lat", place.lat)
     data.setdefault("lng", place.lng)
     data.setdefault("external_id", place.external_id)
+    data.setdefault("standard_stop_id", getattr(place, "standard_bus_stop_id", None) or data.get("standard_stop_id"))
+    data.setdefault("ars_id", getattr(place, "ars_id", None) or data.get("ars_id"))
+    data.setdefault("card_stop_id", data.get("card_stop_id") or data.get("station_id"))
     return data
 
 
@@ -91,10 +94,13 @@ class Router:
                     "transit_info": {
                         "city_code": str(raw_o.get("city_code") or city),
                         "node_id": raw_o.get("node_id") or raw_o.get("external_id"),
+                        "standard_stop_id": raw_o.get("standard_stop_id") or raw_o.get("external_id"),
+                        "ars_id": raw_o.get("ars_id"),
                         "route_id": raw_o.get("route_id"),
                         "route_no": raw_o.get("route_no"),
                         "board_stop": raw_o.get("name"),
                         "alight_stop": raw_d.get("name"),
+                        "alight_stop_id": raw_d.get("standard_stop_id") or raw_d.get("external_id"),
                         "source": "tago",
                         "service": "getSttnAcctoArvlPrearngeInfoList",
                     },
@@ -134,6 +140,7 @@ class Router:
                     "transit_info": {
                         "subway_id": raw_o.get("subway_id"),
                         "station_id": raw_o.get("station_id") or raw_o.get("external_id"),
+                        "card_stop_id": raw_o.get("card_stop_id") or raw_o.get("station_id") or raw_o.get("external_id"),
                         "station_name": station_name or None,
                         "updn_line": raw_o.get("updn_line"),
                         "board_station": raw_o.get("name"),
@@ -184,8 +191,10 @@ class Router:
                     "transit_info": {
                         "city_code": str(raw_bo.get("city_code") or city),
                         "node_id": raw_bo.get("node_id") or raw_bo.get("external_id"),
+                        "standard_stop_id": raw_bo.get("standard_stop_id") or raw_bo.get("external_id"),
                         "board_stop": raw_bo.get("name"),
                         "alight_stop": raw_bm.get("name"),
+                        "alight_stop_id": raw_bm.get("standard_stop_id") or raw_bm.get("external_id"),
                         "source": "tago",
                         "service": "getSttnAcctoArvlPrearngeInfoList",
                     },
@@ -201,6 +210,7 @@ class Router:
                     "transit_info": {
                         "subway_id": raw_sm.get("subway_id"),
                         "station_id": raw_sm.get("station_id") or raw_sm.get("external_id"),
+                        "card_stop_id": raw_sm.get("card_stop_id") or raw_sm.get("station_id") or raw_sm.get("external_id"),
                         "station_name": station_name or None,
                         "board_station": raw_sm.get("name"),
                         "alight_station": raw_sd.get("name"),

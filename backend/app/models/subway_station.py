@@ -15,6 +15,7 @@ class SubwayStation(Base):
         UUID(as_uuid=True), primary_key=True, server_default="uuid_generate_v4()"
     )
     station_id: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    card_stop_id: Mapped[Optional[str]] = mapped_column(String(20))
     subway_id: Mapped[str] = mapped_column(String(10), nullable=False)
     line_name: Mapped[Optional[str]] = mapped_column(String(50))
     station_code: Mapped[Optional[str]] = mapped_column(String(10))
@@ -42,4 +43,5 @@ class SubwayStation(Base):
     __table_args__ = (
         Index("idx_stations_subway", "subway_id", "display_order"),
         Index("idx_stations_place", "place_id"),
+        Index("idx_stations_card_stop", "card_stop_id"),
     )
