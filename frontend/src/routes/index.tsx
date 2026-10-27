@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CAR_MINUTES,
@@ -25,6 +25,14 @@ import {
   startGuidance,
   type SelectedPlace,
 } from "@/lib/api";
+import {
+  getLocationDecision,
+  getSavedOrigin,
+  isUsablePlace,
+  saveOrigin,
+  setLocationDecision,
+  setLocationNotice,
+} from "@/lib/location-permission";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -59,14 +67,24 @@ const dotClass: Record<string, string> = {
   bus: "bg-bus",
 };
 
+const EMPTY_ORIGIN: Place = {
+  name: "",
+  detail: "출발지를 입력해주세요",
+  lat: Number.NaN,
+  lng: Number.NaN,
+  placeholder: true,
+};
+
 function PlaceField({
   label,
   value,
+  emptyHint,
   onChange,
   tone,
 }: {
   label: string;
   value: string;
+  emptyHint: string;
   onChange: (p: Place) => void;
   tone: "origin" | "destination";
 }) {
@@ -143,7 +161,7 @@ function PlaceField({
             setOpen(true);
           }}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={open ? "역·장소 검색" : value}
+          placeholder={open ? "역·장소 검색" : value || emptyHint}
           aria-label={`${label} 검색`}
           className={`w-full bg-transparent text-sm font-semibold outline-none ${
             dark
@@ -241,9 +259,11 @@ function toSelected(p: Place): SelectedPlace {
 }
 
 function TransitPlanner() {
-  const [originPlace, setOriginPlace] = useState<Place>(PLACES[0]!);
+  const navigate = useNavigate();
+  const [ready, setReady] = useState(false);
+  const [originPlace, setOriginPlace] = useState<Place>(EMPTY_ORIGIN);
   const [destinationPlace, setDestinationPlace] = useState<Place>(PLACES[1]!);
-  const origin = originPlace.name;
+  const origin = originPlace.name || originPlace.detail;
   const destination = destinationPlace.name;
   const [speed, setSpeed] = useState<Speed>("normal");
   const [selected, setSelected] = useState("r1");
@@ -261,6 +281,23 @@ function TransitPlanner() {
   }, []);
 
   useEffect(() => {
+    if (!getLocationDecision()) {
+      void navigate({ to: "/permission" });
+      return;
+    }
+    const saved = getSavedOrigin();
+    if (saved) setOriginPlace(saved);
+    setReady(true);
+  }, [navigate]);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!isUsablePlace(originPlace) || !isUsablePlace(destinationPlace)) {
+      setApiRoutes(null);
+      setSearching(false);
+      setStatus("");
+      return;
+    }
     let cancelled = false;
     setSearching(true);
     setStatus("경로를 찾는 중…");
@@ -282,29 +319,32 @@ function TransitPlanner() {
     return () => {
       cancelled = true;
     };
-  }, [originPlace, destinationPlace, speed, refreshTick]);
+  }, [originPlace, destinationPlace, speed, refreshTick, ready]);
 
+  const canSearch = isUsablePlace(originPlace) && isUsablePlace(destinationPlace);
   const ranked = useMemo(
     () =>
-      [...(apiRoutes && apiRoutes.length > 0 ? apiRoutes : ROUTES)].sort(
+      [...(apiRoutes && apiRoutes.length > 0 ? apiRoutes : canSearch ? ROUTES : [])].sort(
         (a, b) => routeTotalMinutes(a, speed) - routeTotalMinutes(b, speed),
       ),
-    [speed, apiRoutes],
+    [speed, apiRoutes, canSearch],
   );
-  const fastest: RouteOption = ranked[0]!;
-  const transitMin = routeTotalMinutes(fastest, speed);
+  const fastest: RouteOption | undefined = ranked[0];
+  const transitMin = fastest ? routeTotalMinutes(fastest, speed) : 0;
   const walkOnly = walkMinutes(WALK_ONLY_BASE, speed);
   const detail = ranked.find((r) => r.id === selected) ?? fastest;
-  const detailTransferWait = detail.legs
-    .filter((l) => l.kind === "transfer")
-    .reduce((s, l) => s + l.minutes, 0);
+  const detailTransferWait = detail
+    ? detail.legs.filter((l) => l.kind === "transfer").reduce((s, l) => s + l.minutes, 0)
+    : 0;
 
   const modes = [
-    { key: "transit", label: "대중교통", minutes: transitMin, note: `환승 ${fastest.transfers}회` },
+    { key: "transit", label: "대중교통", minutes: transitMin, note: `환승 ${fastest?.transfers ?? 0}회` },
     { key: "car", label: "자가용", minutes: CAR_MINUTES, note: "차량 9.4km" },
     { key: "walk", label: "도보", minutes: walkOnly, note: `${SPEEDS[speed].label} 속도` },
   ];
   const bestMode = modes.reduce((a, b) => (b.minutes < a.minutes ? b : a));
+
+  if (!ready) return null;
 
   return (
     <div className="min-h-screen bg-background font-sans text-foreground antialiased">
@@ -336,10 +376,20 @@ function TransitPlanner() {
               <span className="size-2.5 rounded-full bg-line2" />
             </div>
             <div className="flex-1 space-y-2">
-              <PlaceField label="출발" value={origin} onChange={setOriginPlace} tone="origin" />
+              <PlaceField
+                label="출발"
+                value={originPlace.name}
+                emptyHint="출발지를 입력해주세요"
+                onChange={(p) => {
+                  saveOrigin(p);
+                  setOriginPlace(p);
+                }}
+                tone="origin"
+              />
               <PlaceField
                 label="목적"
-                value={destination}
+                value={destinationPlace.name}
+                emptyHint="어디로 이동하시나요?"
                 onChange={setDestinationPlace}
                 tone="destination"
               />
@@ -364,6 +414,9 @@ function TransitPlanner() {
                 setLocating(true);
                 void resolveCurrentPlace()
                   .then((place) => {
+                    setLocationDecision("granted");
+                    saveOrigin(place);
+                    setLocationNotice(null);
                     setOriginPlace(place);
                     setStatus("");
                   })
@@ -528,6 +581,7 @@ function TransitPlanner() {
         </section>
 
         {/* 경로 상세 + 실시간 도착 + 환승 대기 */}
+        {detail && (
         <section className="mt-5 animate-rise [animation-delay:260ms]">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-xs font-bold tracking-tight">경로 상세</h2>
@@ -554,8 +608,10 @@ function TransitPlanner() {
             ))}
           </div>
         </section>
+        )}
 
         {/* 개략도 */}
+        {detail && (
         <section className="mt-5 animate-rise [animation-delay:320ms]">
           <div className="relative overflow-hidden rounded-3xl bg-ink-soft p-4">
             <div
@@ -594,6 +650,7 @@ function TransitPlanner() {
             </div>
           </div>
         </section>
+        )}
 
         {status && (
           <p className="mt-3 text-center text-[11px] text-muted-foreground">{status}</p>
@@ -601,7 +658,7 @@ function TransitPlanner() {
         <button
           type="button"
           onClick={() => {
-            if (!detail.fromApi) {
+            if (!detail?.fromApi) {
               setStatus("실시간 경로를 찾은 뒤 출발할 수 있습니다.");
               return;
             }
